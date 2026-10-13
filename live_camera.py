@@ -29,6 +29,7 @@ class AutomaticPlateProcessor(VideoProcessorBase):
         model_loader: Callable[[], tuple[object, object, object]] | None = None,
         require_vehicle_detection: bool = False,
         background_processing: bool = False,
+        frame_publisher: Callable[[np.ndarray], None] | None = None,
     ) -> None:
         self.detector = detector
         self.ocr_service = ocr_service
@@ -38,6 +39,7 @@ class AutomaticPlateProcessor(VideoProcessorBase):
         self.model_loader = model_loader
         self.require_vehicle_detection = require_vehicle_detection
         self.background_processing = background_processing
+        self.frame_publisher = frame_publisher
         self._models_loaded = model_loader is None
         self._model_load_error = ""
         self._model_load_lock = threading.Lock()
@@ -309,4 +311,6 @@ class AutomaticPlateProcessor(VideoProcessorBase):
     def recv(self, frame: VideoFrame) -> VideoFrame:
         image = frame.to_ndarray(format="bgr24")
         processed = self.process(image)
+        if self.frame_publisher:
+            self.frame_publisher(processed)
         return VideoFrame.from_ndarray(processed, format="bgr24")

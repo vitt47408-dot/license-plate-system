@@ -17,6 +17,7 @@ import streamlit as st
 from streamlit_webrtc import WebRtcMode, webrtc_streamer
 from PIL import Image
 
+from camera_relay import camera_relay
 from database import (
     add_event,
     add_ocr_sample,
@@ -575,7 +576,7 @@ def record_live_camera_event(
     )
 
 
-def render_live_camera(direction: str) -> None:
+def render_live_camera(direction: str, pair_code: str | None = None) -> None:
     st.caption(
         "Bật camera trình duyệt bằng nút START. App quét tối đa mỗi 1 giây, "
         "tự lưu biển số đúng định dạng khi OCR đạt từ 65% trong ít nhất 2 lần đọc; "
@@ -587,6 +588,11 @@ def render_live_camera(direction: str) -> None:
     )
 
     def create_processor() -> AutomaticPlateProcessor:
+        frame_publisher = None
+        if pair_code:
+            def frame_publisher(frame: np.ndarray) -> None:
+                camera_relay.publish(pair_code, frame)
+
         return AutomaticPlateProcessor(
             detector=None,
             ocr_service=None,
@@ -594,11 +600,12 @@ def render_live_camera(direction: str) -> None:
             record_event=record_live_camera_event,
             require_vehicle_detection=True,
             background_processing=True,
+            frame_publisher=frame_publisher,
             model_loader=get_live_camera_models,
         )
 
     context = webrtc_streamer(
-        key=f"automatic_plate_camera_{direction}",
+        key=f"automatic_plate_camera_{direction}_{pair_code or 'local'}",
         mode=WebRtcMode.SENDRECV,
         video_processor_factory=create_processor,
         media_stream_constraints={
@@ -621,6 +628,100 @@ def render_live_camera(direction: str) -> None:
         )
     else:
         st.info("Nhấn START trong khung camera và cho phép trình duyệt truy cập camera.")
+
+
+def render_remote_camera_link() -> None:
+    st.markdown("### Liên kết camera điện thoại với máy tính")
+    st.caption(
+        "Điện thoại phát camera qua HTTPS; máy tính nhập mã ghép đôi để xem hình trực tiếp. "
+        "Cả hai thiết bị cần mở ứng dụng và đăng nhập."
+    )
+    role = st.radio(
+        "Thiết bị này sẽ",
+        ["Phát camera từ điện thoại", "Xem camera trên máy tính"],
+        horizontal=True,
+        key="remote_camera_role",
+    )
+
+    if role == "Phát camera từ điện thoại":
+        pair_code = st.session_state.get("remote_camera_pair_code")
+        if not pair_code:
+            if st.button(
+                "Tạo mã liên kết camera",
+                type="primary",
+                use_container_width=True,
+                key="create_remote_camera_pair",
+            ):
+                try:
+                    pair_code = camera_relay.create_pairing_code()
+                except RuntimeError as exc:
+                    st.error(f"Không tạo được liên kết camera: {exc}")
+                else:
+                    st.session_state["remote_camera_pair_code"] = pair_code
+                    st.rerun()
+            return
+
+        st.success("Mã liên kết đã sẵn sàng. Nhập mã này trên máy tính để xem camera.")
+        st.code(pair_code, language="text")
+        direction = st.radio(
+            "Hướng của camera",
+            ["IN", "OUT"],
+            horizontal=True,
+            format_func=lambda value: "Chỉ ghi XE VÀO" if value == "IN" else "Chỉ ghi XE RA",
+            key="remote_automatic_camera_direction",
+        )
+        if st.button("Thu hồi mã liên kết", key="revoke_remote_camera_pair"):
+            camera_relay.revoke_pairing_code(pair_code)
+            st.session_state.pop("remote_camera_pair_code", None)
+            st.rerun()
+        render_live_camera(direction, pair_code=pair_code)
+        return
+
+    with st.form("remote_camera_viewer_form"):
+        entered_code = st.text_input(
+            "Mã liên kết từ điện thoại",
+            max_chars=camera_relay.CODE_LENGTH,
+            help="Nhập mã đang hiển thị trên điện thoại.",
+        ).strip().upper()
+        connect = st.form_submit_button("Kết nối camera", type="primary")
+    if connect:
+        if not camera_relay.has_pairing_code(entered_code):
+            st.error("Mã không hợp lệ hoặc đã hết hạn. Tạo mã mới trên điện thoại.")
+        else:
+            st.session_state["remote_camera_viewer_code"] = entered_code
+
+    pair_code = st.session_state.get("remote_camera_viewer_code")
+    if pair_code:
+        if not camera_relay.has_pairing_code(pair_code):
+            st.session_state.pop("remote_camera_viewer_code", None)
+            st.warning("Mã liên kết đã hết hạn. Tạo mã mới trên điện thoại.")
+        else:
+            track = st.session_state.get("remote_camera_viewer_track")
+            if (
+                track is None
+                or st.session_state.get("remote_camera_viewer_track_code") != pair_code
+            ):
+                try:
+                    track = camera_relay.create_track(pair_code)
+                except ValueError as exc:
+                    st.error(f"Không thể mở camera đã ghép: {exc}")
+                    return
+                st.session_state["remote_camera_viewer_track"] = track
+                st.session_state["remote_camera_viewer_track_code"] = pair_code
+
+            st.info("Đang chờ video từ điện thoại. Bấm START nếu chưa kết nối.")
+            context = webrtc_streamer(
+                key=f"remote_camera_viewer_{pair_code}",
+                mode=WebRtcMode.RECVONLY,
+                source_video_track=track,
+                media_stream_constraints={"video": False, "audio": False},
+                async_processing=True,
+                rtc_configuration={
+                    "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+                },
+            )
+            if context.state.playing:
+                st.success("Đã kết nối luồng camera từ xa.")
 
 
 def reset_live_capture() -> None:
@@ -704,7 +805,11 @@ def render_overview() -> None:
         st.markdown('<div class="monitor-panel-title">Camera giám sát</div>', unsafe_allow_html=True)
         input_source = st.radio(
             "Nguồn hình ảnh",
-            ["Camera trực tiếp (tự động)", "Ảnh/video (thủ công)"],
+            [
+                "Camera trực tiếp (tự động)",
+                "Liên kết camera từ xa",
+                "Ảnh/video (thủ công)",
+            ],
             horizontal=True,
             key="live_input_source",
             on_change=reset_live_capture,
@@ -719,6 +824,8 @@ def render_overview() -> None:
                 key="automatic_camera_direction",
             )
             render_live_camera(live_direction)
+        elif input_source == "Liên kết camera từ xa":
+            render_remote_camera_link()
         else:
             uploaded_file = st.file_uploader(
                 "Chọn JPG/PNG hoặc MP4/AVI",
