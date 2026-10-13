@@ -481,6 +481,15 @@ def decode_video_scan_preview(image_bytes: bytes) -> np.ndarray:
     return frame
 
 
+def detect_video_frame(detector: PlateDetector, frame: np.ndarray) -> list[dict]:
+    try:
+        return detector.detect(frame, imgsz=416)
+    except TypeError as exc:
+        if "unexpected keyword argument" not in str(exc) or "imgsz" not in str(exc):
+            raise
+        return detector.detect(frame)
+
+
 def scan_video_for_plates(
     video_path: str,
     progress_callback: Callable[[int, int], None] | None = None,
@@ -516,7 +525,7 @@ def scan_video_for_plates(
                 break
 
             scan_frame = resize_video_scan_frame(frame)
-            for detection in detector.detect(scan_frame, imgsz=416):
+            for detection in detect_video_frame(detector, scan_frame):
                 crop = detector.crop_plate(scan_frame, detection)
                 result = ocr_service.recognize(crop)
                 text = str(result.get("text") or "").strip()

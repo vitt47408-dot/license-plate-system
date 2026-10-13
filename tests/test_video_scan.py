@@ -47,10 +47,10 @@ class FakeVideoCapture:
 
 class FakeDetector:
     def __init__(self):
-        self.image_sizes = []
+        self.detected_shapes = []
 
-    def detect(self, frame, imgsz=640):
-        self.image_sizes.append(imgsz)
+    def detect(self, frame):
+        self.detected_shapes.append(frame.shape)
         return [{"box": True}]
 
     def crop_plate(self, frame, detection):
@@ -89,7 +89,7 @@ class VideoScanTests(unittest.TestCase):
         self.assertTrue(truncated)
         self.assertTrue(capture.released)
         self.assertEqual(capture.grab_calls, 392)
-        self.assertEqual(detector.image_sizes, [416] * 28)
+        self.assertEqual(detector.detected_shapes, [(80, 160, 3)] * 28)
         self.assertEqual(progress[-1], (28, 28))
         self.assertTrue(all(isinstance(item["frame_jpeg"], bytes) for item in results))
         decoded = app.decode_video_scan_preview(results[0]["frame_jpeg"])
@@ -102,6 +102,26 @@ class VideoScanTests(unittest.TestCase):
         decoded = app.decode_video_scan_preview(encoded)
 
         self.assertLessEqual(max(decoded.shape[:2]), app.MAX_VIDEO_SCAN_PREVIEW_SIZE)
+
+    def test_uses_default_detector_size_when_imgsz_override_is_unsupported(self):
+        class OlderDetector:
+            def detect(self, frame):
+                return [{"frame_shape": frame.shape}]
+
+        frame = np.zeros((40, 80, 3), dtype=np.uint8)
+
+        detections = app.detect_video_frame(OlderDetector(), frame)
+
+        self.assertEqual(detections, [{"frame_shape": (40, 80, 3)}])
+
+    def test_does_not_hide_unrelated_detector_type_errors(self):
+        class BrokenDetector:
+            def detect(self, frame, imgsz=640):
+                raise TypeError("detector implementation failed")
+
+        frame = np.zeros((40, 80, 3), dtype=np.uint8)
+        with self.assertRaisesRegex(TypeError, "detector implementation failed"):
+            app.detect_video_frame(BrokenDetector(), frame)
 
 
 if __name__ == "__main__":
