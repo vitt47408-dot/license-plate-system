@@ -115,6 +115,7 @@ Với Streamlit Community Cloud:
 
 1. Đưa mã nguồn lên một repository GitHub; không đưa `.venv`, `datasets`, `runs`, `license_plate.db`, ảnh trong `evidence`/`uploads` hoặc thông tin bí mật lên repository. File `.gitignore` trong dự án đã loại các dữ liệu này khỏi những lần thêm file mới.
 2. Mở [share.streamlit.io](https://share.streamlit.io/), đăng nhập bằng GitHub, chọn **Create app**, rồi chọn repository, branch và `app.py`.
+   Repository có `packages.txt` để cài thư viện hệ thống OpenCV cần trên Linux; sau khi thay đổi file này, dùng **Reboot app** để Cloud cài lại dependency.
 3. Trước khi deploy, mở **Advanced settings > Secrets** và đặt mật khẩu riêng, dài ít nhất 12 ký tự:
 
    ```toml
