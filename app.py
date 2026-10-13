@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-import io
 import hashlib
 import hmac
-import sqlite3
+import io
 import shutil
+import sqlite3
+import stat
+import tempfile
 import zipfile
 from datetime import date, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable
 
 import cv2
@@ -22,6 +24,7 @@ from database import (
     add_event,
     add_ocr_sample,
     backup_database,
+    DB_PATH,
     delete_vehicle,
     export_history_csv,
     export_history_excel,
@@ -40,10 +43,12 @@ from database import (
     list_vehicles,
     log_audit,
     normalize_plate,
-    review_event,
     get_setting,
+    restore_database,
+    review_event,
     set_setting,
     upsert_vehicle,
+    validate_database_backup,
 )
 from ocr_engine import OCRService
 from plate_detector import PlateDetector
@@ -56,6 +61,9 @@ EVIDENCE_DIR = BASE_DIR / "evidence"
 OCR_SAMPLE_DIR = EVIDENCE_DIR / "ocr_samples"
 EXPORT_DIR = BASE_DIR / "exports"
 MODEL_DIR = BASE_DIR / "models"
+MAX_BACKUP_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
+MAX_VIDEO_SCAN_RESULTS = 25
+MAX_VIDEO_SCAN_PREVIEW_SIZE = 1280
 
 PAGE_DETAILS = {
     "Giám sát trực tiếp": ("Giám sát trực tiếp", "Camera, nhận diện biển số và xác nhận sự kiện tại cổng."),
@@ -442,10 +450,41 @@ def read_frame_from_video(video_path: str, frame_number: int = 0):
     return frame
 
 
+def resize_video_scan_frame(frame: np.ndarray) -> np.ndarray:
+    height, width = frame.shape[:2]
+    scale = min(1.0, MAX_VIDEO_SCAN_PREVIEW_SIZE / max(height, width))
+    if scale < 1.0:
+        return cv2.resize(
+            frame,
+            (max(1, round(width * scale)), max(1, round(height * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+    return frame
+
+
+def encode_video_scan_preview(frame: np.ndarray) -> bytes:
+    frame = resize_video_scan_frame(frame)
+    success, encoded = cv2.imencode(
+        ".jpg",
+        frame,
+        [cv2.IMWRITE_JPEG_QUALITY, 80],
+    )
+    if not success:
+        raise ValueError("Không thể mã hóa ảnh xem trước của kết quả quét video.")
+    return encoded.tobytes()
+
+
+def decode_video_scan_preview(image_bytes: bytes) -> np.ndarray:
+    frame = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if frame is None or frame.size == 0:
+        raise ValueError("Không thể đọc lại ảnh của kết quả quét video.")
+    return frame
+
+
 def scan_video_for_plates(
     video_path: str,
     progress_callback: Callable[[int, int], None] | None = None,
-) -> list[dict]:
+) -> tuple[list[dict], bool]:
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         cap.release()
@@ -468,6 +507,7 @@ def scan_video_for_plates(
         )
 
     found: dict[str, dict] = {}
+    results_truncated = False
     try:
         for sample_index, frame_number in enumerate(range(0, frame_count, frame_stride)):
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
@@ -475,8 +515,9 @@ def scan_video_for_plates(
             if not ok or frame is None or frame.size == 0:
                 continue
 
-            for detection in detector.detect(frame):
-                crop = detector.crop_plate(frame, detection)
+            scan_frame = resize_video_scan_frame(frame)
+            for detection in detector.detect(scan_frame):
+                crop = detector.crop_plate(scan_frame, detection)
                 result = ocr_service.recognize(crop)
                 text = str(result.get("text") or "").strip()
                 plate = normalize_plate(text)
@@ -485,23 +526,35 @@ def scan_video_for_plates(
                 if len(plate) < 5:
                     continue
 
+                rank = (plate_like, confidence)
+                previous = found.get(plate)
+                if previous is not None and rank <= previous["rank"]:
+                    continue
+                if previous is None and len(found) >= MAX_VIDEO_SCAN_RESULTS:
+                    lowest_plate = min(found, key=lambda key: found[key]["rank"])
+                    if rank <= found[lowest_plate]["rank"]:
+                        results_truncated = True
+                        continue
+                    del found[lowest_plate]
+                    results_truncated = True
+
                 candidate = {
                     "plate": plate,
                     "confidence": confidence,
                     "plate_like": plate_like,
                     "frame_number": frame_number,
-                    "frame": frame.copy(),
-                    "rank": (plate_like, confidence),
+                    "frame_jpeg": encode_video_scan_preview(scan_frame),
+                    "rank": rank,
                 }
-                if plate not in found or candidate["rank"] > found[plate]["rank"]:
-                    found[plate] = candidate
+                found[plate] = candidate
 
             if progress_callback and (sample_index % 5 == 0 or sample_index + 1 == sample_count):
                 progress_callback(sample_index + 1, sample_count)
     finally:
         cap.release()
 
-    return list(found.values())
+    results = sorted(found.values(), key=lambda item: item["rank"], reverse=True)
+    return results, results_truncated
 
 
 def capture_local_camera(camera_index: int) -> np.ndarray:
@@ -857,7 +910,7 @@ def render_overview() -> None:
                         ):
                             progress = st.progress(0, text="Đang quét video...")
                             try:
-                                scan_results = scan_video_for_plates(
+                                scan_results, scan_results_truncated = scan_video_for_plates(
                                     video_path,
                                     lambda current, total: progress.progress(
                                         current / total,
@@ -867,9 +920,10 @@ def render_overview() -> None:
                                 st.session_state["dashboard_video_scan"] = {
                                     "signature": upload_hash,
                                     "results": scan_results,
+                                    "truncated": scan_results_truncated,
                                 }
                                 st.session_state.pop("dashboard_video_scan_message", None)
-                            except (OSError, RuntimeError, ValueError) as exc:
+                            except (cv2.error, MemoryError, OSError, RuntimeError, ValueError) as exc:
                                 st.error(f"Không quét được video: {exc}")
                             finally:
                                 progress.empty()
@@ -891,7 +945,7 @@ def render_overview() -> None:
                         st.session_state["dashboard_scan_requested"] = True
                         st.session_state["dashboard_upload_key"] = upload_key
                         st.session_state.pop("dashboard_analysis", None)
-                except (OSError, ValueError) as exc:
+                except (cv2.error, OSError, ValueError) as exc:
                     st.error(f"Không đọc được tệp đầu vào: {exc}")
 
     pending_capture = st.session_state.get("dashboard_capture_bytes")
@@ -1204,8 +1258,13 @@ def render_overview() -> None:
         st.subheader("Kết quả quét toàn bộ video")
         st.caption(
             "Ứng dụng lấy mẫu video tối đa 2 khung hình/giây (tối đa 300 khung hình), "
-            "gộp các lần đọc trùng biển số và lưu ảnh khung hình rõ nhất."
+            f"gộp kết quả trùng và giữ tối đa {MAX_VIDEO_SCAN_RESULTS} ảnh xem trước đã nén."
         )
+        if video_scan.get("truncated"):
+            st.warning(
+                f"Video có nhiều kết quả OCR khác nhau; chỉ hiển thị "
+                f"{MAX_VIDEO_SCAN_RESULTS} kết quả có độ tin cậy cao nhất để giảm tải bộ nhớ."
+            )
         if not scan_results:
             st.info("Không tìm thấy biển số đọc được trong video đã quét.")
         else:
@@ -1215,7 +1274,7 @@ def render_overview() -> None:
                     with st.container(border=True):
                         preview_column, fields_column = st.columns([1, 1.5])
                         preview_column.image(
-                            cv2.cvtColor(item["frame"], cv2.COLOR_BGR2RGB),
+                            item["frame_jpeg"],
                             caption=f"Khung hình {item['frame_number']}",
                             use_container_width=True,
                         )
@@ -1273,10 +1332,11 @@ def render_overview() -> None:
                         skipped.append(f"{plate}: vừa được ghi nhận cùng hướng trong 25 giây.")
                         continue
                     try:
+                        frame = decode_video_scan_preview(item["frame_jpeg"])
                         event = process_confirmed_event(
                             plate,
                             direction,
-                            item["frame"],
+                            frame,
                             "uploaded_video",
                             item["confidence"],
                         )
@@ -1288,7 +1348,7 @@ def render_overview() -> None:
                             f"source=uploaded_video confidence={item['confidence']:.3f}",
                         )
                         recorded.append(event["plate_number"])
-                    except (OSError, sqlite3.Error, ValueError) as exc:
+                    except (cv2.error, OSError, sqlite3.Error, ValueError) as exc:
                         errors.append(f"{plate}: {exc}")
 
                 st.session_state["dashboard_video_scan_message"] = {
@@ -2331,37 +2391,167 @@ def render_ai_training() -> None:
                 st.error(f"Đánh giá YOLO thất bại: {exc}")
 
 
+def create_backup_package(output_path: Path) -> str:
+    with tempfile.TemporaryDirectory(prefix="plate_backup_", dir=EXPORT_DIR) as temp_dir:
+        database_path = Path(temp_dir) / "license_plate.db"
+        backup_database(str(database_path))
+        with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.write(database_path, "license_plate.db")
+            for source_dir, archive_root in (
+                (EVIDENCE_DIR, "evidence"),
+                (UPLOAD_DIR, "uploads"),
+            ):
+                for source_file in source_dir.rglob("*"):
+                    if source_file.is_file():
+                        archive_name = PurePosixPath(
+                            archive_root,
+                            *source_file.relative_to(source_dir).parts,
+                        ).as_posix()
+                        archive.write(source_file, archive_name)
+    return str(output_path)
+
+
+def restore_backup_package(uploaded_file) -> str:
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="plate_restore_", dir=EXPORT_DIR) as temp_dir:
+        staged_database = Path(temp_dir) / "license_plate.db"
+        entries: list[tuple[zipfile.ZipInfo, PurePosixPath]] = []
+        database_entries = 0
+        uncompressed_size = 0
+
+        with zipfile.ZipFile(io.BytesIO(uploaded_file.getvalue()), "r") as archive:
+            for info in archive.infolist():
+                name = info.filename
+                if name == "license_plate.db":
+                    database_entries += 1
+                    if info.is_dir():
+                        raise ValueError("File database trong bản sao lưu không hợp lệ.")
+                    entries.append((info, PurePosixPath(name)))
+                    uncompressed_size += info.file_size
+                    if uncompressed_size > MAX_BACKUP_UNCOMPRESSED_BYTES:
+                        raise ValueError("Bản sao lưu vượt quá giới hạn giải nén 2 GB.")
+                    continue
+
+                path = PurePosixPath(name)
+                mode = info.external_attr >> 16
+                if info.is_dir() and path.parts in {("evidence",), ("uploads",)}:
+                    continue
+                if (
+                    path.is_absolute()
+                    or len(path.parts) < 2
+                    or path.parts[0] not in {"evidence", "uploads"}
+                    or any(part in {"", ".", ".."} for part in path.parts)
+                    or "\\" in name
+                    or stat.S_ISLNK(mode)
+                ):
+                    raise ValueError(f"Đường dẫn file không an toàn trong bản sao lưu: {name}")
+                entries.append((info, path))
+                uncompressed_size += info.file_size
+                if uncompressed_size > MAX_BACKUP_UNCOMPRESSED_BYTES:
+                    raise ValueError("Bản sao lưu vượt quá giới hạn giải nén 2 GB.")
+
+            if database_entries != 1:
+                raise ValueError("Bản sao lưu phải chứa đúng một file license_plate.db.")
+
+            database_info = next(info for info, path in entries if path.as_posix() == "license_plate.db")
+            with archive.open(database_info) as source, staged_database.open("wb") as target:
+                shutil.copyfileobj(source, target)
+            validate_database_backup(str(staged_database))
+
+            storage_dirs = {"evidence": EVIDENCE_DIR, "uploads": UPLOAD_DIR}
+            for info, path in entries:
+                if path.as_posix() == "license_plate.db" or info.is_dir():
+                    continue
+                target = storage_dirs[path.parts[0]].joinpath(*path.parts[1:])
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(info) as source, target.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+
+        restored_path = restore_database(str(staged_database), str(EVIDENCE_DIR))
+
+    init_db()
+    log_audit(
+        "backup_restored",
+        "backup",
+        Path(uploaded_file.name).name,
+        f"database={restored_path}",
+    )
+    return restored_path
+
+
 def render_backup_audit() -> None:
-    st.subheader("Sao lưu")
-    st.write("Tạo bản sao nhất quán của SQLite và gói ảnh minh chứng để tải về.")
+    restore_message = st.session_state.pop("backup_restore_message", "")
+    if restore_message:
+        st.success(restore_message)
+
+    st.subheader("Vị trí lưu dữ liệu")
+    st.write("Dữ liệu được lưu trên máy đang chạy ứng dụng:")
+    st.code(
+        f"Database: {DB_PATH}\nẢnh bằng chứng: {EVIDENCE_DIR}\nFile tải lên: {UPLOAD_DIR}",
+        language="text",
+    )
+    if DB_PATH.is_file():
+        st.caption(f"Database hiện có ({DB_PATH.stat().st_size:,} byte).")
+    else:
+        st.warning("Chưa thấy file database; file sẽ được tạo khi ứng dụng khởi tạo.")
+    st.caption("Thông tin xe/lịch sử nằm trong SQLite; ảnh bằng chứng và file tải lên được lưu riêng.")
+
+    st.divider()
+    st.subheader("Sao lưu và khôi phục")
+    st.write("Tạo một file ZIP gồm database, ảnh bằng chứng và file đã tải lên để quét.")
     if st.button("Tạo bản sao lưu", type="primary", key="create_backup"):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        database_path = EXPORT_DIR / f"license_plate_backup_{timestamp}.db"
-        evidence_path = EXPORT_DIR / f"evidence_backup_{timestamp}.zip"
+        backup_path = EXPORT_DIR / f"license_plate_backup_{timestamp}.zip"
         try:
-            backup_database(str(database_path))
-            with zipfile.ZipFile(evidence_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-                for evidence in EVIDENCE_DIR.rglob("*"):
-                    if evidence.is_file():
-                        archive.write(evidence, evidence.relative_to(EVIDENCE_DIR))
-            log_audit("backup_created", "backup", timestamp, f"database={database_path.name}; evidence={evidence_path.name}")
-            st.session_state["latest_backup"] = (str(database_path), str(evidence_path))
-            st.success("Đã tạo bản sao dữ liệu và ảnh minh chứng.")
-        except (OSError, zipfile.BadZipFile) as exc:
+            create_backup_package(backup_path)
+            log_audit("backup_created", "backup", timestamp, f"package={backup_path.name}")
+            st.session_state["latest_backup"] = str(backup_path)
+            st.success("Đã tạo bản sao lưu database, ảnh bằng chứng và file tải lên.")
+        except (OSError, sqlite3.Error, zipfile.BadZipFile, ValueError) as exc:
+            backup_path.unlink(missing_ok=True)
             st.error(f"Tạo bản sao lưu thất bại: {exc}")
 
-    backup_files = st.session_state.get("latest_backup")
-    if backup_files:
-        downloads = st.columns(2)
-        for column, path, label, mime in [
-            (downloads[0], backup_files[0], "Tải SQLite database", "application/vnd.sqlite3"),
-            (downloads[1], backup_files[1], "Tải ảnh minh chứng ZIP", "application/zip"),
-        ]:
-            try:
-                with open(path, "rb") as source:
-                    column.download_button(label, source.read(), file_name=Path(path).name, mime=mime)
-            except OSError as exc:
-                st.error(f"Không đọc được file backup {path}: {exc}")
+    backup_path = st.session_state.get("latest_backup")
+    if backup_path and Path(backup_path).is_file():
+        try:
+            with open(backup_path, "rb") as backup_file:
+                st.download_button(
+                    "Tải bản sao lưu ZIP",
+                    backup_file.read(),
+                    file_name=Path(backup_path).name,
+                    mime="application/zip",
+                )
+        except OSError as exc:
+            st.error(f"Không đọc được file backup {backup_path}: {exc}")
+
+    st.markdown("#### Khôi phục từ file ZIP")
+    st.warning(
+        "Khôi phục sẽ thay database hiện tại và ghi đè file trùng tên trong evidence/uploads. "
+        "File khác đang có sẽ được giữ lại. Tạo, tải backup hiện tại trước khi tiếp tục."
+    )
+    restore_file = st.file_uploader(
+        "Chọn bản sao lưu của ứng dụng",
+        type=["zip"],
+        key="restore_backup_upload",
+    )
+    confirmed_restore = st.checkbox(
+        "Tôi hiểu rằng thao tác này sẽ thay dữ liệu hiện tại",
+        key="confirm_backup_restore",
+    )
+    if st.button(
+        "Khôi phục bản sao lưu",
+        type="primary",
+        key="restore_backup",
+        disabled=restore_file is None or not confirmed_restore,
+    ):
+        try:
+            restored_path = restore_backup_package(restore_file)
+            st.session_state["backup_restore_message"] = (
+                f"Đã khôi phục dữ liệu thành công từ bản sao lưu vào {restored_path}."
+            )
+            st.rerun()
+        except (OSError, sqlite3.Error, ValueError, zipfile.BadZipFile, RuntimeError) as exc:
+            st.error(f"Khôi phục bản sao lưu thất bại: {exc}")
 
     st.divider()
     st.subheader("Nhật ký hệ thống")
@@ -2435,6 +2625,8 @@ def render_config() -> None:
             st.rerun()
         except (OSError, sqlite3.Error) as exc:
             st.error(f"Không lưu được sức chứa: {exc}")
+    st.divider()
+    render_backup_audit()
 
 
 def main() -> None:

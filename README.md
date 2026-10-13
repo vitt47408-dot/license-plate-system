@@ -150,7 +150,7 @@ Trong triển khai này, file trọng số `models/plate_detector_yolov8n.pt` đ
 
 ### 7.2. Tải video
 - Tải video MP4/AVI và chọn một khung hình để xem nhanh.
-- Bấm **Quét tìm biển số trong toàn video** để nhận diện nhiều biển số trên các khung hình được lấy mẫu; kiểm tra/sửa từng biển số và chỉ xác nhận các xe cần ghi nhận.
+- Bấm **Quét tìm biển số trong toàn video** để nhận diện nhiều biển số trên các khung hình được lấy mẫu; khung hình được thu nhỏ để giảm bộ nhớ và tối đa 25 kết quả OCR khác nhau được giữ làm ảnh xem trước. Nếu có nhiều hơn, app giữ kết quả có độ tin cậy cao nhất và thông báo đã giới hạn kết quả; kiểm tra/sửa từng biển số và chỉ xác nhận các xe cần ghi nhận.
 - Mỗi biển số khác nhau chỉ xuất hiện một lần trong danh sách quét; các lần đọc trùng được gộp lại. Quét không thay thế việc người vận hành xác minh hướng và nội dung biển số.
 
 ### 7.3. Lưu lịch sử xe vào/ra
@@ -239,7 +239,9 @@ Trong triển khai này, file trọng số `models/plate_detector_yolov8n.pt` đ
 
 ### 7.7. Sao lưu
 
-- Dừng ứng dụng rồi sao chép `license_plate.db` cùng thư mục `evidence` sang vị trí sao lưu.
+- Trong app, mở **Cấu hình > Sao lưu và khôi phục**, chọn **Tạo bản sao lưu**, rồi tải file ZIP về nơi lưu trữ an toàn.
+- File ZIP bao gồm database, ảnh bằng chứng và file đã tải lên. Để khôi phục, chọn file ZIP, xác nhận thao tác thay thế dữ liệu hiện tại rồi bấm **Khôi phục bản sao lưu**.
+- App mặc định lưu tại thư mục dự án: `license_plate.db` và `evidence/`. Khi chạy trên hosting có ổ đĩa tạm thời, hãy tải backup ra ngoài app thường xuyên; dữ liệu trên hosting có thể mất khi khởi động lại hoặc triển khai lại.
 
 ## 8. Dữ liệu ảnh/video mẫu
 
@@ -252,19 +254,18 @@ sample_data/
   - traffic_01.mp4
 ```
 
-## 9. Cách sao lưu cơ sở dữ liệu
+## 9. Vị trí dữ liệu
 
-File database SQLite được lưu ở:
+Khi chạy trên máy tính, ứng dụng lưu dữ liệu trong thư mục dự án:
 
 ```text
-license_plate.db
+license_plate.db   # Hồ sơ xe, lịch sử ra/vào, cài đặt và nhật ký
+evidence/          # Ảnh bằng chứng và ảnh mẫu OCR
+uploads/           # Ảnh/video tải lên để quét
+exports/           # Báo cáo và các file backup
 ```
 
-Sao lưu bằng cách copy file này vào thư mục backup, ví dụ:
-
-```cmd
-copy license_plate.db backup\license_plate_20261011.db
-```
+Các file database và ảnh nằm trên máy chủ chạy Streamlit. Với bản chạy cục bộ, chúng nằm trên máy tính đó; với dịch vụ hosting dùng ổ đĩa tạm thời, dữ liệu có thể mất khi ứng dụng khởi động lại hoặc triển khai lại. Hãy tạo ZIP backup trong mục **Cấu hình** và tải xuống một nơi lưu trữ bền vững.
 
 ## 10. Các lỗi thường gặp và cách sửa
 

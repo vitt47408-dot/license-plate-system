@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import math
+import os
 import sqlite3
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -542,6 +544,85 @@ def backup_database(output_path: str) -> str:
     finally:
         backup.close()
         source.close()
+    return str(target)
+
+
+def validate_database_backup(source_path: str) -> None:
+    source_file = Path(source_path)
+    if not source_file.is_file():
+        raise ValueError("Không tìm thấy file database trong bản sao lưu.")
+
+    conn = sqlite3.connect(source_file)
+    try:
+        integrity = conn.execute("PRAGMA integrity_check").fetchone()
+        if integrity is None or integrity[0] != "ok":
+            raise ValueError("Database trong bản sao lưu bị lỗi hoặc không toàn vẹn.")
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        if not {"vehicles", "access_events"}.issubset(tables):
+            raise ValueError("File được chọn không phải database của ứng dụng.")
+    except sqlite3.DatabaseError as exc:
+        raise ValueError(f"Không thể đọc database trong bản sao lưu: {exc}") from exc
+    finally:
+        conn.close()
+
+
+def _remap_restored_image_paths(conn: sqlite3.Connection, evidence_root: Path) -> None:
+    for table in ("access_events", "ocr_samples"):
+        columns = {
+            row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if "image_path" not in columns:
+            continue
+        rows = conn.execute(
+            f"SELECT id, image_path FROM {table} WHERE image_path IS NOT NULL AND image_path != ''"
+        ).fetchall()
+        for row_id, image_path in rows:
+            normalized = str(image_path).replace("\\", "/")
+            marker = "/evidence/"
+            if marker not in normalized.lower():
+                continue
+            relative_path = normalized[normalized.lower().rfind(marker) + len(marker) :]
+            relative_parts = relative_path.split("/")
+            if any(part in {"", ".", ".."} for part in relative_parts):
+                continue
+            target = evidence_root.joinpath(*relative_parts)
+            if target.is_file():
+                conn.execute(
+                    f"UPDATE {table} SET image_path = ? WHERE id = ?",
+                    (str(target), row_id),
+                )
+
+
+def restore_database(source_path: str, evidence_root: Optional[str] = None) -> str:
+    validate_database_backup(source_path)
+    target = DB_PATH
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging_path = target.with_name(f".{target.name}.{uuid.uuid4().hex}.restore")
+    source = sqlite3.connect(source_path)
+    staging = None
+    try:
+        staging = sqlite3.connect(staging_path)
+        source.backup(staging)
+        if evidence_root:
+            _remap_restored_image_paths(staging, Path(evidence_root))
+        staging.commit()
+        integrity = staging.execute("PRAGMA integrity_check").fetchone()
+        if integrity is None or integrity[0] != "ok":
+            raise ValueError("Không thể khôi phục vì database bản sao lưu không toàn vẹn.")
+        staging.close()
+        staging = None
+        os.replace(staging_path, target)
+    finally:
+        source.close()
+        if staging is not None:
+            staging.close()
+        if staging_path.exists():
+            staging_path.unlink()
     return str(target)
 
 
