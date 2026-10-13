@@ -154,6 +154,8 @@ class OCRService:
                     plate_like = self._looks_like_vietnamese_plate(text)
                     score = confidence + (0.35 if plate_like else 0.0)
                     candidates.append((score, text, confidence, plate_like))
+                    if plate_like and confidence >= 0.65:
+                        break
         except (OSError, RuntimeError, ValueError, TypeError, IndexError) as exc:  # pragma: no cover
             return {"text": "", "confidence": 0.0, "error": f"OCR thất bại: {exc}"}
 

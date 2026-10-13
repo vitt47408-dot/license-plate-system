@@ -1,4 +1,5 @@
 import unittest
+import threading
 
 from av import VideoFrame
 import numpy as np
@@ -39,6 +40,17 @@ class NoVehicleDetector:
 
     def draw_boxes(self, frame, detections):
         return frame.copy()
+
+
+class BlockingDetector(FakeDetector):
+    def __init__(self):
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def detect(self, frame):
+        self.started.set()
+        self.release.wait(timeout=2)
+        return super().detect(frame)
 
 
 class AutomaticPlateProcessorTests(unittest.TestCase):
@@ -144,6 +156,25 @@ class AutomaticPlateProcessorTests(unittest.TestCase):
         self.assertEqual(result.shape, self.frame.shape)
         self.assertIn("MODEL LOAD FAILED", processor._status)
         self.assertIn("weights unavailable", processor.messages[-1])
+
+    def test_background_scan_does_not_block_camera_preview(self):
+        detector = BlockingDetector()
+        processor = AutomaticPlateProcessor(
+            detector=detector,
+            ocr_service=FakeOCR(),
+            direction="IN",
+            record_event=lambda *args: "saved",
+            background_processing=True,
+        )
+
+        result = processor.process(self.frame, now=1.0)
+
+        self.assertEqual(result.shape, self.frame.shape)
+        self.assertTrue(detector.started.wait(timeout=1))
+        self.assertTrue(processor._scan_worker_running)
+        detector.release.set()
+        processor._scan_thread.join(timeout=2)
+        self.assertFalse(processor._scan_worker_running)
 
     def test_implements_webrtc_video_processor_contract(self):
         self.assertIsInstance(self.processor, VideoProcessorBase)

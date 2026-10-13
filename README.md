@@ -132,7 +132,7 @@ Trong triển khai này, file trọng số `models/plate_detector_yolov8n.pt` đ
 
 ### 7.1. Giám sát trực tiếp và nhận diện
 - Vào **Giám sát trực tiếp**, chọn **Camera trực tiếp (tự động)**, chọn hướng **XE VÀO/XE RA**, bấm **START** và cấp quyền camera. Video được nhận diện liên tục từ webcam hoặc camera điện thoại của thiết bị đang mở trang.
-- App quét tối đa mỗi 1 giây, khoanh xanh thân xe và vùng biển số, rồi tự lưu khi nhận được cả xe lẫn biển số và OCR đạt ngưỡng lọc; không cần xác nhận từng biển số. Kiểm tra danh sách sự kiện tự động để rà lại kết quả vì OCR vẫn có thể đọc sai.
+- App xử lý nhận diện nền để video preview không phải chờ YOLO/OCR; kết quả mới nhất được dùng để vẽ khung xanh thân xe và biển số. App nhận diện gần mỗi 1 giây và tự lưu khi nhận được cả xe lẫn biển số, OCR đạt ngưỡng lọc; không cần xác nhận từng biển số. Với kết quả OCR rõ, app dừng sớm sau lượt nhận dạng đầu; nếu chưa rõ, app vẫn thử các ảnh tăng cường để giữ độ nhạy. Kiểm tra danh sách sự kiện tự động để rà lại kết quả vì OCR vẫn có thể đọc sai.
 - Camera trực tiếp cần HTTPS và kết nối WebRTC; firewall/mạng chặn STUN có thể ngăn truyền video.
 - Nếu camera không mở, kiểm tra quyền camera của trình duyệt/Windows tại **Settings > Privacy & security > Camera**, rồi thử tải lại trang và bấm START lần nữa.
 - Có thể chọn **Ảnh/video (thủ công)** nếu cần quét riêng tệp; đây là luồng riêng, không thay cho camera trực tiếp.

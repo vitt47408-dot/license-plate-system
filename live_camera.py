@@ -28,6 +28,7 @@ class AutomaticPlateProcessor(VideoProcessorBase):
         consensus_window: float = 4.0,
         model_loader: Callable[[], tuple[object, object, object]] | None = None,
         require_vehicle_detection: bool = False,
+        background_processing: bool = False,
     ) -> None:
         self.detector = detector
         self.ocr_service = ocr_service
@@ -36,14 +37,19 @@ class AutomaticPlateProcessor(VideoProcessorBase):
         self.vehicle_detector = vehicle_detector
         self.model_loader = model_loader
         self.require_vehicle_detection = require_vehicle_detection
+        self.background_processing = background_processing
         self._models_loaded = model_loader is None
         self._model_load_error = ""
         self._model_load_lock = threading.Lock()
+        self._state_lock = threading.Lock()
         self.minimum_confidence = minimum_confidence
         self.required_sightings = required_sightings
         self.scan_interval = scan_interval
         self.consensus_window = consensus_window
         self._last_scan_at = float("-inf")
+        self._pending_scan: tuple[np.ndarray, float] | None = None
+        self._scan_worker_running = False
+        self._scan_thread: threading.Thread | None = None
         self._last_detections: list[dict] = []
         self._last_vehicle_detections: list[dict] = []
         self._sightings: dict[str, tuple[int, float]] = {}
@@ -54,13 +60,15 @@ class AutomaticPlateProcessor(VideoProcessorBase):
 
     @property
     def messages(self) -> list[str]:
-        return list(self._messages.values())[-3:]
+        with self._state_lock:
+            return list(self._messages.values())[-3:]
 
     def _add_message(self, plate: str, message: str) -> None:
-        self._messages[plate] = message
-        self._messages.move_to_end(plate)
-        while len(self._messages) > 10:
-            self._messages.popitem(last=False)
+        with self._state_lock:
+            self._messages[plate] = message
+            self._messages.move_to_end(plate)
+            while len(self._messages) > 10:
+                self._messages.popitem(last=False)
 
     def _ensure_models_loaded(self) -> bool:
         if self._models_loaded:
@@ -91,55 +99,11 @@ class AutomaticPlateProcessor(VideoProcessorBase):
                 return False
         return True
 
-    def _annotate(
-        self,
-        frame: np.ndarray,
-        detections: list[dict],
-        vehicle_detections: list[dict],
-    ) -> np.ndarray:
-        output = self.detector.draw_boxes(frame, detections) if detections else frame.copy()
-        if self.vehicle_detector and vehicle_detections:
-            output = self.vehicle_detector.draw_boxes(output, vehicle_detections)
-        if self._status:
-            cv2.putText(
-                output,
-                self._status,
-                (12, 28),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 255, 0) if detections else (0, 180, 255),
-                2,
-                cv2.LINE_AA,
-            )
-        messages = self.messages
-        for index, message in enumerate(messages):
-            cv2.putText(
-                output,
-                message[:90],
-                (12, max(28, output.shape[0] - 16 - (len(messages) - index - 1) * 26)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (0, 220, 170),
-                2,
-                cv2.LINE_AA,
-            )
-        return output
-
-    def process(self, frame: np.ndarray, now: float | None = None) -> np.ndarray:
-        if frame is None or frame.size == 0:
-            raise ValueError("Camera trả về khung hình rỗng.")
-
-        current_time = time.monotonic() if now is None else now
-        if current_time - self._last_scan_at < self.scan_interval:
-            return self._annotate(
-                frame,
-                self._last_detections,
-                self._last_vehicle_detections,
-            )
-        self._last_scan_at = current_time
-
+    def _scan_frame(self, frame: np.ndarray, current_time: float) -> None:
         if not self._ensure_models_loaded():
-            return self._annotate(frame, [], [])
+            self._last_detections = []
+            self._last_vehicle_detections = []
+            return
 
         if self.require_vehicle_detection and self.vehicle_detector is None:
             self._status = "VEHICLE MODEL UNAVAILABLE · AUTO-SAVE DISABLED"
@@ -147,7 +111,9 @@ class AutomaticPlateProcessor(VideoProcessorBase):
                 "SYSTEM",
                 "Không có mô hình xe; khung thân xe và tự ghi nhận đang bị khóa.",
             )
-            return self._annotate(frame, [], [])
+            self._last_detections = []
+            self._last_vehicle_detections = []
+            return
 
         detections = self.detector.detect(frame)
         self._last_detections = detections
@@ -185,7 +151,7 @@ class AutomaticPlateProcessor(VideoProcessorBase):
                 self._status = "PLATE ROI · WAITING FOR VEHICLE ROI"
             else:
                 self._status = "NO VEHICLE ROI · AUTO-SAVE DISABLED"
-            return self._annotate(frame, detections, vehicle_detections)
+            return
 
         for detection in detections:
             crop = self.detector.crop_plate(frame, detection)
@@ -243,7 +209,102 @@ class AutomaticPlateProcessor(VideoProcessorBase):
                 self._saved_in_visit.discard(plate)
                 self._retry_after.pop(plate, None)
 
-        return self._annotate(frame, detections, vehicle_detections)
+    def _run_scan_worker(self) -> None:
+        while True:
+            with self._state_lock:
+                task = self._pending_scan
+                self._pending_scan = None
+                if task is None:
+                    self._scan_worker_running = False
+                    return
+
+            frame, scan_time = task
+            try:
+                self._scan_frame(frame, scan_time)
+            except (OSError, RuntimeError, ValueError, TypeError, IndexError, sqlite3.Error) as exc:
+                self._last_detections = []
+                self._last_vehicle_detections = []
+                self._status = f"SCAN FAILED · {str(exc)[:60]}"
+                self._add_message("SYSTEM", f"Lỗi xử lý khung hình: {exc}")
+
+    def _schedule_scan(self, frame: np.ndarray, current_time: float) -> None:
+        start_worker = False
+        with self._state_lock:
+            if current_time - self._last_scan_at < self.scan_interval:
+                return
+            self._last_scan_at = current_time
+            self._pending_scan = (frame.copy(), current_time)
+            self._status = "ĐANG PHÂN TÍCH · QUÉT MỖI 1 GIÂY"
+            if not self._scan_worker_running:
+                self._scan_worker_running = True
+                start_worker = True
+
+        if start_worker:
+            worker = threading.Thread(
+                target=self._run_scan_worker,
+                name="plate-camera-scan",
+                daemon=True,
+            )
+            self._scan_thread = worker
+            worker.start()
+
+    def process(self, frame: np.ndarray, now: float | None = None) -> np.ndarray:
+        if frame is None or frame.size == 0:
+            raise ValueError("Camera trả về khung hình rỗng.")
+
+        current_time = time.monotonic() if now is None else now
+        if self.background_processing:
+            self._schedule_scan(frame, current_time)
+            with self._state_lock:
+                detections = list(self._last_detections)
+                vehicle_detections = list(self._last_vehicle_detections)
+                status = self._status
+            return self._annotate(frame, detections, vehicle_detections, status)
+
+        if current_time - self._last_scan_at >= self.scan_interval:
+            self._last_scan_at = current_time
+            self._scan_frame(frame, current_time)
+        with self._state_lock:
+            detections = list(self._last_detections)
+            vehicle_detections = list(self._last_vehicle_detections)
+            status = self._status
+        return self._annotate(frame, detections, vehicle_detections, status)
+
+    def _annotate(
+        self,
+        frame: np.ndarray,
+        detections: list[dict],
+        vehicle_detections: list[dict],
+        status: str | None = None,
+    ) -> np.ndarray:
+        output = self.detector.draw_boxes(frame, detections) if detections else frame.copy()
+        if self.vehicle_detector and vehicle_detections:
+            output = self.vehicle_detector.draw_boxes(output, vehicle_detections)
+        status = self._status if status is None else status
+        if status:
+            cv2.putText(
+                output,
+                status,
+                (12, 28),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 0) if detections else (0, 180, 255),
+                2,
+                cv2.LINE_AA,
+            )
+        messages = self.messages
+        for index, message in enumerate(messages):
+            cv2.putText(
+                output,
+                message[:90],
+                (12, max(28, output.shape[0] - 16 - (len(messages) - index - 1) * 26)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (0, 220, 170),
+                2,
+                cv2.LINE_AA,
+            )
+        return output
 
     def recv(self, frame: VideoFrame) -> VideoFrame:
         image = frame.to_ndarray(format="bgr24")

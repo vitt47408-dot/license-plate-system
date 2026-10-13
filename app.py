@@ -586,6 +586,7 @@ def render_live_camera(direction: str) -> None:
             direction=direction,
             record_event=record_live_camera_event,
             require_vehicle_detection=True,
+            background_processing=True,
             model_loader=lambda: (
                 get_plate_detector(),
                 get_ocr_service(),
@@ -597,7 +598,14 @@ def render_live_camera(direction: str) -> None:
         key=f"automatic_plate_camera_{direction}",
         mode=WebRtcMode.SENDRECV,
         video_processor_factory=create_processor,
-        media_stream_constraints={"video": True, "audio": False},
+        media_stream_constraints={
+            "video": {
+                "width": {"ideal": 1280},
+                "height": {"ideal": 720},
+                "frameRate": {"ideal": 15, "max": 20},
+            },
+            "audio": False,
+        },
         async_processing=True,
         rtc_configuration={
             "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
