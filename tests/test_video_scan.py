@@ -70,6 +70,15 @@ class FakeOCR:
         }
 
 
+class NonPlateOCR(FakeOCR):
+    def recognize(self, crop):
+        return {
+            "text": "00030571F58580TM",
+            "confidence": 0.54,
+            "plate_like": False,
+        }
+
+
 class VideoScanTests(unittest.TestCase):
     def test_scan_caps_unique_results_and_stores_compressed_previews(self):
         capture = FakeVideoCapture(frame_count=420)
@@ -102,6 +111,19 @@ class VideoScanTests(unittest.TestCase):
         decoded = app.decode_video_scan_preview(encoded)
 
         self.assertLessEqual(max(decoded.shape[:2]), app.MAX_VIDEO_SCAN_PREVIEW_SIZE)
+
+    def test_scan_discards_ocr_text_that_is_not_a_plate_format(self):
+        capture = FakeVideoCapture(frame_count=15)
+        with (
+            patch.object(app.cv2, "VideoCapture", return_value=capture),
+            patch.object(app, "get_plate_detector", return_value=FakeDetector()),
+            patch.object(app, "get_ocr_service", return_value=NonPlateOCR()),
+        ):
+            results, truncated = app.scan_video_for_plates("video.mp4")
+
+        self.assertEqual(results, [])
+        self.assertFalse(truncated)
+        self.assertTrue(capture.released)
 
     def test_uses_default_detector_size_when_imgsz_override_is_unsupported(self):
         class OlderDetector:

@@ -532,7 +532,7 @@ def scan_video_for_plates(
                 plate = normalize_plate(text)
                 confidence = float(result.get("confidence") or 0)
                 plate_like = bool(result.get("plate_like"))
-                if len(plate) >= 5:
+                if len(plate) >= 5 and plate_like:
                     rank = (plate_like, confidence)
                     previous = found.get(plate)
                     if previous is not None and rank <= previous["rank"]:
@@ -1271,7 +1271,8 @@ def render_overview() -> None:
         st.caption(
             "Ứng dụng lấy mẫu video tối đa 2 khung hình/giây (tối đa 300 khung hình), "
             f"chạy detector ở 416 px, gộp kết quả trùng và giữ tối đa "
-            f"{MAX_VIDEO_SCAN_RESULTS} ảnh xem trước đã nén."
+            f"{MAX_VIDEO_SCAN_RESULTS} ảnh xem trước đã nén. Chỉ hiển thị OCR có định dạng "
+            "giống biển số; vẫn cần kiểm tra ký tự, nhất là khi confidence thấp."
         )
         if video_scan.get("truncated"):
             st.warning(
