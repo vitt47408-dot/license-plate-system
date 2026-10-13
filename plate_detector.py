@@ -128,10 +128,10 @@ class PlateDetector:
                 kept.append(candidate)
         return kept
 
-    def detect(self, image: np.ndarray) -> List[dict]:
+    def detect(self, image: np.ndarray, imgsz: int = 640) -> List[dict]:
         if self.model is not None:
             try:
-                results = self.model(image, imgsz=640, conf=0.25, verbose=False)
+                results = self.model(image, imgsz=imgsz, conf=0.25, verbose=False)
                 detections: List[dict] = []
                 image_height, image_width = image.shape[:2]
                 for result in results:

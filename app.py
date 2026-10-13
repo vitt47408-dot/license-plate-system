@@ -508,48 +508,51 @@ def scan_video_for_plates(
 
     found: dict[str, dict] = {}
     results_truncated = False
+    frame_number = 0
     try:
-        for sample_index, frame_number in enumerate(range(0, frame_count, frame_stride)):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+        for sample_index in range(sample_count):
             ok, frame = cap.read()
             if not ok or frame is None or frame.size == 0:
-                continue
+                break
 
             scan_frame = resize_video_scan_frame(frame)
-            for detection in detector.detect(scan_frame):
+            for detection in detector.detect(scan_frame, imgsz=416):
                 crop = detector.crop_plate(scan_frame, detection)
                 result = ocr_service.recognize(crop)
                 text = str(result.get("text") or "").strip()
                 plate = normalize_plate(text)
                 confidence = float(result.get("confidence") or 0)
                 plate_like = bool(result.get("plate_like"))
-                if len(plate) < 5:
-                    continue
-
-                rank = (plate_like, confidence)
-                previous = found.get(plate)
-                if previous is not None and rank <= previous["rank"]:
-                    continue
-                if previous is None and len(found) >= MAX_VIDEO_SCAN_RESULTS:
-                    lowest_plate = min(found, key=lambda key: found[key]["rank"])
-                    if rank <= found[lowest_plate]["rank"]:
-                        results_truncated = True
+                if len(plate) >= 5:
+                    rank = (plate_like, confidence)
+                    previous = found.get(plate)
+                    if previous is not None and rank <= previous["rank"]:
                         continue
-                    del found[lowest_plate]
-                    results_truncated = True
+                    if previous is None and len(found) >= MAX_VIDEO_SCAN_RESULTS:
+                        lowest_plate = min(found, key=lambda key: found[key]["rank"])
+                        if rank <= found[lowest_plate]["rank"]:
+                            results_truncated = True
+                            continue
+                        del found[lowest_plate]
+                        results_truncated = True
 
-                candidate = {
-                    "plate": plate,
-                    "confidence": confidence,
-                    "plate_like": plate_like,
-                    "frame_number": frame_number,
-                    "frame_jpeg": encode_video_scan_preview(scan_frame),
-                    "rank": rank,
-                }
-                found[plate] = candidate
+                    found[plate] = {
+                        "plate": plate,
+                        "confidence": confidence,
+                        "plate_like": plate_like,
+                        "frame_number": frame_number,
+                        "frame_jpeg": encode_video_scan_preview(scan_frame),
+                        "rank": rank,
+                    }
 
             if progress_callback and (sample_index % 5 == 0 or sample_index + 1 == sample_count):
                 progress_callback(sample_index + 1, sample_count)
+
+            frames_to_skip = min(frame_stride - 1, frame_count - frame_number - 1)
+            for _ in range(frames_to_skip):
+                if not cap.grab():
+                    break
+            frame_number += frame_stride
     finally:
         cap.release()
 
@@ -1258,7 +1261,8 @@ def render_overview() -> None:
         st.subheader("Kết quả quét toàn bộ video")
         st.caption(
             "Ứng dụng lấy mẫu video tối đa 2 khung hình/giây (tối đa 300 khung hình), "
-            f"gộp kết quả trùng và giữ tối đa {MAX_VIDEO_SCAN_RESULTS} ảnh xem trước đã nén."
+            f"chạy detector ở 416 px, gộp kết quả trùng và giữ tối đa "
+            f"{MAX_VIDEO_SCAN_RESULTS} ảnh xem trước đã nén."
         )
         if video_scan.get("truncated"):
             st.warning(

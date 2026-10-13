@@ -151,7 +151,7 @@ Trong triển khai này, file trọng số `models/plate_detector_yolov8n.pt` đ
 
 ### 7.2. Tải video
 - Tải video MP4/AVI và chọn một khung hình để xem nhanh.
-- Bấm **Quét tìm biển số trong toàn video** để nhận diện nhiều biển số trên các khung hình được lấy mẫu; khung hình được thu nhỏ để giảm bộ nhớ và tối đa 25 kết quả OCR khác nhau được giữ làm ảnh xem trước. Nếu có nhiều hơn, app giữ kết quả có độ tin cậy cao nhất và thông báo đã giới hạn kết quả; kiểm tra/sửa từng biển số và chỉ xác nhận các xe cần ghi nhận.
+- Bấm **Quét tìm biển số trong toàn video** để nhận diện nhiều biển số trên các khung hình được lấy mẫu; video được đọc tuần tự (không seek riêng từng mẫu), khung lớn được thu nhỏ và detector dùng ảnh 416 px để giảm thời gian CPU. Tối đa 25 kết quả OCR khác nhau được giữ làm ảnh xem trước. Nếu có nhiều hơn, app giữ kết quả có độ tin cậy cao nhất và thông báo đã giới hạn kết quả; kiểm tra/sửa từng biển số và chỉ xác nhận các xe cần ghi nhận.
 - Mỗi biển số khác nhau chỉ xuất hiện một lần trong danh sách quét; các lần đọc trùng được gộp lại. Quét không thay thế việc người vận hành xác minh hướng và nội dung biển số.
 
 ### 7.3. Lưu lịch sử xe vào/ra
