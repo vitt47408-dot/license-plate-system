@@ -97,6 +97,54 @@ class AutomaticPlateProcessorTests(unittest.TestCase):
             "PLATE ROI · WAITING FOR VEHICLE ROI",
         )
 
+    def test_requires_vehicle_detector_when_configured_for_live_app(self):
+        recorded = []
+        processor = AutomaticPlateProcessor(
+            detector=FakeDetector(),
+            ocr_service=FakeOCR(),
+            direction="IN",
+            record_event=lambda *args: recorded.append(args) or "saved",
+            require_vehicle_detection=True,
+        )
+
+        processor.process(self.frame, now=1.0)
+
+        self.assertEqual(recorded, [])
+        self.assertIn("AUTO-SAVE DISABLED", processor._status)
+
+    def test_defers_model_loading_until_first_camera_frame(self):
+        loaded = []
+        processor = AutomaticPlateProcessor(
+            detector=None,
+            ocr_service=None,
+            direction="IN",
+            record_event=lambda *args: "saved",
+            model_loader=lambda: (
+                loaded.append(True) or FakeDetector(),
+                FakeOCR(),
+                None,
+            ),
+        )
+
+        self.assertEqual(loaded, [])
+        processor.process(self.frame, now=1.0)
+        self.assertEqual(loaded, [True])
+
+    def test_reports_model_load_failure_without_crashing_camera_frame(self):
+        processor = AutomaticPlateProcessor(
+            detector=None,
+            ocr_service=None,
+            direction="IN",
+            record_event=lambda *args: "saved",
+            model_loader=lambda: (_ for _ in ()).throw(RuntimeError("weights unavailable")),
+        )
+
+        result = processor.process(self.frame, now=1.0)
+
+        self.assertEqual(result.shape, self.frame.shape)
+        self.assertIn("MODEL LOAD FAILED", processor._status)
+        self.assertIn("weights unavailable", processor.messages[-1])
+
     def test_implements_webrtc_video_processor_contract(self):
         self.assertIsInstance(self.processor, VideoProcessorBase)
         self.assertEqual(self.processor.scan_interval, 1.0)

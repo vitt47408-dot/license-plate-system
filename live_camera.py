@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 import time
 from collections import OrderedDict
 from typing import Callable
@@ -25,12 +26,19 @@ class AutomaticPlateProcessor(VideoProcessorBase):
         required_sightings: int = 2,
         scan_interval: float = 1.0,
         consensus_window: float = 4.0,
+        model_loader: Callable[[], tuple[object, object, object]] | None = None,
+        require_vehicle_detection: bool = False,
     ) -> None:
         self.detector = detector
         self.ocr_service = ocr_service
         self.direction = direction
         self.record_event = record_event
         self.vehicle_detector = vehicle_detector
+        self.model_loader = model_loader
+        self.require_vehicle_detection = require_vehicle_detection
+        self._models_loaded = model_loader is None
+        self._model_load_error = ""
+        self._model_load_lock = threading.Lock()
         self.minimum_confidence = minimum_confidence
         self.required_sightings = required_sightings
         self.scan_interval = scan_interval
@@ -53,6 +61,35 @@ class AutomaticPlateProcessor(VideoProcessorBase):
         self._messages.move_to_end(plate)
         while len(self._messages) > 10:
             self._messages.popitem(last=False)
+
+    def _ensure_models_loaded(self) -> bool:
+        if self._models_loaded:
+            return not self._model_load_error
+
+        with self._model_load_lock:
+            if self._models_loaded:
+                return not self._model_load_error
+            try:
+                (
+                    self.detector,
+                    self.ocr_service,
+                    self.vehicle_detector,
+                ) = self.model_loader()
+            except (ImportError, OSError, RuntimeError, ValueError, AssertionError, EOFError) as exc:
+                self._model_load_error = str(exc)
+
+            if not self._model_load_error and not getattr(self.ocr_service, "_loaded", True):
+                self._model_load_error = (
+                    getattr(self.ocr_service, "load_error", "")
+                    or "OCR chưa sẵn sàng; kiểm tra gói EasyOCR và quyền tải mô hình."
+                )
+
+            self._models_loaded = True
+            if self._model_load_error:
+                self._status = f"MODEL LOAD FAILED · {self._model_load_error[:60]}"
+                self._add_message("SYSTEM", f"Không tải được mô hình AI: {self._model_load_error}")
+                return False
+        return True
 
     def _annotate(
         self,
@@ -101,6 +138,17 @@ class AutomaticPlateProcessor(VideoProcessorBase):
             )
         self._last_scan_at = current_time
 
+        if not self._ensure_models_loaded():
+            return self._annotate(frame, [], [])
+
+        if self.require_vehicle_detection and self.vehicle_detector is None:
+            self._status = "VEHICLE MODEL UNAVAILABLE · AUTO-SAVE DISABLED"
+            self._add_message(
+                "SYSTEM",
+                "Không có mô hình xe; khung thân xe và tự ghi nhận đang bị khóa.",
+            )
+            return self._annotate(frame, [], [])
+
         detections = self.detector.detect(frame)
         self._last_detections = detections
         vehicle_detections = (
@@ -109,6 +157,18 @@ class AutomaticPlateProcessor(VideoProcessorBase):
             else []
         )
         self._last_vehicle_detections = vehicle_detections
+        for key, label, model in (
+            ("PLATE MODEL", "biển số", self.detector),
+            ("VEHICLE MODEL", "xe", self.vehicle_detector),
+        ):
+            if model is None:
+                continue
+            model_error = str(getattr(model, "model_error", "") or "")
+            if model_error:
+                self._add_message(
+                    key,
+                    f"Mô hình {label} báo lỗi: {model_error}",
+                )
         self._status = (
             f"PLATE ROI: {len(detections)} · VEHICLE ROI: {len(vehicle_detections)} · 1s"
             if detections

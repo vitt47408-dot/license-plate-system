@@ -569,28 +569,6 @@ def record_live_camera_event(
 
 
 def render_live_camera(direction: str) -> None:
-    detector = get_plate_detector()
-    ocr_service = get_ocr_service()
-    if detector.model_error:
-        st.warning(
-            "Mô hình phát hiện biển số không tải được; đang chuyển sang contour OpenCV. "
-            f"Chi tiết: {detector.model_error}"
-        )
-    if not ocr_service._loaded:
-        st.error(
-            "Không thể bật nhận diện tự động vì OCR chưa sẵn sàng. "
-            f"{ocr_service.load_error or 'Kiểm tra EasyOCR và quyền tải model.'}"
-        )
-        return
-
-    with st.spinner("Đang tải mô hình khoanh vùng xe..."):
-        vehicle_detector = get_vehicle_detector()
-    if vehicle_detector.model_error:
-        st.warning(
-            "Mô hình khoanh vùng thân xe chưa tải được; khung xanh biển số vẫn hoạt động. "
-            f"Chi tiết: {vehicle_detector.model_error}"
-        )
-
     st.caption(
         "Bật camera trình duyệt bằng nút START. App quét tối đa mỗi 1 giây, "
         "tự lưu biển số đúng định dạng khi OCR đạt từ 65% trong ít nhất 2 lần đọc; "
@@ -600,16 +578,25 @@ def render_live_camera(direction: str) -> None:
         "Khung xanh XE khoanh thân xe; khung xanh BIEN SO khoanh biển số. "
         "Chỉ tự lưu khi thấy cả xe thật lẫn biển số; biển số đang hiển thị trên điện thoại/ảnh sẽ không được ghi."
     )
+
+    def create_processor() -> AutomaticPlateProcessor:
+        return AutomaticPlateProcessor(
+            detector=None,
+            ocr_service=None,
+            direction=direction,
+            record_event=record_live_camera_event,
+            require_vehicle_detection=True,
+            model_loader=lambda: (
+                get_plate_detector(),
+                get_ocr_service(),
+                get_vehicle_detector(),
+            ),
+        )
+
     context = webrtc_streamer(
         key=f"automatic_plate_camera_{direction}",
         mode=WebRtcMode.SENDRECV,
-        video_processor_factory=lambda: AutomaticPlateProcessor(
-            detector=detector,
-            ocr_service=ocr_service,
-            direction=direction,
-            record_event=record_live_camera_event,
-            vehicle_detector=vehicle_detector,
-        ),
+        video_processor_factory=create_processor,
         media_stream_constraints={"video": True, "audio": False},
         async_processing=True,
         rtc_configuration={
@@ -617,7 +604,10 @@ def render_live_camera(direction: str) -> None:
         },
     )
     if context.state.playing:
-        st.success("Camera đang chạy — biển số hợp lệ sẽ tự ghi vào lịch sử.")
+        st.success(
+            "Camera đang chạy — lần đầu bật có thể cần thời gian tải mô hình; "
+            "biển số hợp lệ sẽ tự ghi vào lịch sử."
+        )
     else:
         st.info("Nhấn START trong khung camera và cho phép trình duyệt truy cập camera.")
 
