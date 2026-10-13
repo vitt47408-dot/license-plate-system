@@ -20,25 +20,29 @@ class AutomaticPlateProcessor(VideoProcessorBase):
         ocr_service,
         direction: str,
         record_event: Callable[[str, str, np.ndarray, float], str],
+        vehicle_detector=None,
         minimum_confidence: float = 0.65,
         required_sightings: int = 2,
-        scan_interval: float = 0.75,
+        scan_interval: float = 1.0,
         consensus_window: float = 4.0,
     ) -> None:
         self.detector = detector
         self.ocr_service = ocr_service
         self.direction = direction
         self.record_event = record_event
+        self.vehicle_detector = vehicle_detector
         self.minimum_confidence = minimum_confidence
         self.required_sightings = required_sightings
         self.scan_interval = scan_interval
         self.consensus_window = consensus_window
         self._last_scan_at = float("-inf")
         self._last_detections: list[dict] = []
+        self._last_vehicle_detections: list[dict] = []
         self._sightings: dict[str, tuple[int, float]] = {}
         self._saved_in_visit: set[str] = set()
         self._retry_after: dict[str, float] = {}
         self._messages: OrderedDict[str, str] = OrderedDict()
+        self._status = "WAITING FOR CAMERA FRAME"
 
     @property
     def messages(self) -> list[str]:
@@ -50,8 +54,26 @@ class AutomaticPlateProcessor(VideoProcessorBase):
         while len(self._messages) > 10:
             self._messages.popitem(last=False)
 
-    def _annotate(self, frame: np.ndarray, detections: list[dict]) -> np.ndarray:
+    def _annotate(
+        self,
+        frame: np.ndarray,
+        detections: list[dict],
+        vehicle_detections: list[dict],
+    ) -> np.ndarray:
         output = self.detector.draw_boxes(frame, detections) if detections else frame.copy()
+        if self.vehicle_detector and vehicle_detections:
+            output = self.vehicle_detector.draw_boxes(output, vehicle_detections)
+        if self._status:
+            cv2.putText(
+                output,
+                self._status,
+                (12, 28),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 0) if detections else (0, 180, 255),
+                2,
+                cv2.LINE_AA,
+            )
         messages = self.messages
         for index, message in enumerate(messages):
             cv2.putText(
@@ -72,12 +94,38 @@ class AutomaticPlateProcessor(VideoProcessorBase):
 
         current_time = time.monotonic() if now is None else now
         if current_time - self._last_scan_at < self.scan_interval:
-            return self._annotate(frame, self._last_detections)
+            return self._annotate(
+                frame,
+                self._last_detections,
+                self._last_vehicle_detections,
+            )
         self._last_scan_at = current_time
 
         detections = self.detector.detect(frame)
         self._last_detections = detections
+        vehicle_detections = (
+            self.vehicle_detector.detect(frame)
+            if self.vehicle_detector
+            else []
+        )
+        self._last_vehicle_detections = vehicle_detections
+        self._status = (
+            f"PLATE ROI: {len(detections)} · VEHICLE ROI: {len(vehicle_detections)} · 1s"
+            if detections
+            else (
+                "VEHICLE ROI · NO PLATE · CENTER / BRIGHTEN PLATE"
+                if vehicle_detections
+                else "NO VEHICLE OR PLATE · CENTER / BRIGHTEN"
+            )
+        )
         active_plates: set[str] = set()
+
+        if self.vehicle_detector and not vehicle_detections:
+            if detections:
+                self._status = "PLATE ROI · WAITING FOR VEHICLE ROI"
+            else:
+                self._status = "NO VEHICLE ROI · AUTO-SAVE DISABLED"
+            return self._annotate(frame, detections, vehicle_detections)
 
         for detection in detections:
             crop = self.detector.crop_plate(frame, detection)
@@ -99,6 +147,7 @@ class AutomaticPlateProcessor(VideoProcessorBase):
             self._sightings[plate] = (count, current_time)
 
             if count < self.required_sightings:
+                self._status = f"PLATE ROI · CHECKING OCR {count}/{self.required_sightings}"
                 self._add_message(plate, f"{plate}: đang xác minh OCR ({count}/{self.required_sightings})")
                 continue
 
@@ -117,11 +166,16 @@ class AutomaticPlateProcessor(VideoProcessorBase):
             except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
                 message = f"{plate}: không lưu được sự kiện ({exc})"
                 self._retry_after[plate] = current_time + 5.0
+                self._status = "PLATE ROI · SAVE FAILED"
             else:
                 self._saved_in_visit.add(plate)
                 self._retry_after.pop(plate, None)
+                self._status = "PLATE ROI · AUTO-SAVED"
 
             self._add_message(plate, message)
+
+        if detections and not active_plates:
+            self._status = "GREEN ROI · OCR LOW / PLATE NOT CONFIRMED"
 
         for plate, (_, last_seen) in list(self._sightings.items()):
             if plate not in active_plates and current_time - last_seen > self.consensus_window:
@@ -129,7 +183,7 @@ class AutomaticPlateProcessor(VideoProcessorBase):
                 self._saved_in_visit.discard(plate)
                 self._retry_after.pop(plate, None)
 
-        return self._annotate(frame, detections)
+        return self._annotate(frame, detections, vehicle_detections)
 
     def recv(self, frame: VideoFrame) -> VideoFrame:
         image = frame.to_ndarray(format="bgr24")

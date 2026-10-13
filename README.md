@@ -126,13 +126,13 @@ Với Streamlit Community Cloud:
 
 Trong triển khai này, file trọng số `models/plate_detector_yolov8n.pt` được giữ lại để detector YOLO hoạt động; thư mục dữ liệu huấn luyện và checkpoint phụ không được đưa lên. Nếu repository không thể chứa trọng số, tải nó lên nơi lưu trữ phù hợp và cấu hình bước tải trọng số trước khi chạy app.
 
-**Lưu ý triển khai:** camera trực tiếp sử dụng WebRTC qua HTTPS từ chính thiết bị mở trang. Quyền camera cần được cấp trên trình duyệt; mạng bị chặn WebRTC/STUN có thể ngăn kết nối. Chọn hướng theo vị trí camera vì app không suy ra chiều xe chỉ từ một khung hình. Biển số được tự ghi sau ít nhất hai lần OCR nhất định, đúng định dạng phổ biến và confidence từ 65%; cùng biển số/hướng bị lọc trùng 25 giây. Màn hình đăng nhập dùng chung một mật khẩu; chỉ chia sẻ mật khẩu với người được phép truy cập. SQLite và ảnh bằng chứng được lưu trên ổ đĩa máy chủ; trên hosting có ổ đĩa tạm thời, dữ liệu có thể mất khi máy chủ khởi động lại hoặc triển khai lại. Không dùng làm hệ thống lưu hồ sơ lâu dài nếu chưa chuyển cơ sở dữ liệu/ảnh sang dịch vụ lưu trữ bền vững và có sao lưu.
+**Lưu ý triển khai:** camera trực tiếp sử dụng WebRTC qua HTTPS từ chính thiết bị mở trang. Quyền camera cần được cấp trên trình duyệt; mạng bị chặn WebRTC/STUN có thể ngăn kết nối. Chọn hướng theo vị trí camera vì app không suy ra chiều xe chỉ từ một khung hình. Khung xanh phân biệt **CAR/MOTORCYCLE/BUS/TRUCK** (xe) và **BIEN SO** (biển số); mô hình YOLO COCO cho xe `yolov8n.pt` được tải tự động từ Ultralytics khi bật camera lần đầu, cần kết nối mạng. App chỉ lưu khi thấy xe thật cùng biển số; hai lần OCR phải đúng định dạng phổ biến và confidence từ 65%. Cùng biển số/hướng bị lọc trùng 25 giây. Màn hình đăng nhập dùng chung một mật khẩu; chỉ chia sẻ mật khẩu với người được phép truy cập. SQLite và ảnh bằng chứng được lưu trên ổ đĩa máy chủ; trên hosting có ổ đĩa tạm thời, dữ liệu có thể mất khi máy chủ khởi động lại hoặc triển khai lại. Không dùng làm hệ thống lưu hồ sơ lâu dài nếu chưa chuyển cơ sở dữ liệu/ảnh sang dịch vụ lưu trữ bền vững và có sao lưu.
 
 ## 7. Kiểm thử MVP
 
 ### 7.1. Giám sát trực tiếp và nhận diện
 - Vào **Giám sát trực tiếp**, chọn **Camera trực tiếp (tự động)**, chọn hướng **XE VÀO/XE RA**, bấm **START** và cấp quyền camera. Video được nhận diện liên tục từ webcam hoặc camera điện thoại của thiết bị đang mở trang.
-- App tự lưu khi OCR đạt ngưỡng lọc; không cần xác nhận từng biển số. Kiểm tra danh sách sự kiện tự động để rà lại kết quả vì OCR vẫn có thể đọc sai.
+- App quét tối đa mỗi 1 giây, khoanh xanh thân xe và vùng biển số, rồi tự lưu khi nhận được cả xe lẫn biển số và OCR đạt ngưỡng lọc; không cần xác nhận từng biển số. Kiểm tra danh sách sự kiện tự động để rà lại kết quả vì OCR vẫn có thể đọc sai.
 - Camera trực tiếp cần HTTPS và kết nối WebRTC; firewall/mạng chặn STUN có thể ngăn truyền video.
 - Nếu camera không mở, kiểm tra quyền camera của trình duyệt/Windows tại **Settings > Privacy & security > Camera**, rồi thử tải lại trang và bấm START lần nữa.
 - Có thể chọn **Ảnh/video (thủ công)** nếu cần quét riêng tệp; đây là luồng riêng, không thay cho camera trực tiếp.

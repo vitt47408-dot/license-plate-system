@@ -89,17 +89,66 @@ class PlateDetector:
                 best.append(candidate)
         return best[:3]
 
+    @staticmethod
+    def _suppress_duplicate_detections(detections: List[dict]) -> List[dict]:
+        kept: List[dict] = []
+        for candidate in sorted(
+            detections,
+            key=lambda item: float(item.get("confidence") or 0),
+            reverse=True,
+        ):
+            x1, y1, x2, y2 = (
+                int(candidate[key]) for key in ("x1", "y1", "x2", "y2")
+            )
+            candidate_area = max(1, (x2 - x1) * (y2 - y1))
+            duplicate = False
+            for existing in kept:
+                inter_width = max(
+                    0,
+                    min(x2, int(existing["x2"])) - max(x1, int(existing["x1"])),
+                )
+                inter_height = max(
+                    0,
+                    min(y2, int(existing["y2"])) - max(y1, int(existing["y1"])),
+                )
+                intersection = inter_width * inter_height
+                existing_area = max(
+                    1,
+                    (int(existing["x2"]) - int(existing["x1"]))
+                    * (int(existing["y2"]) - int(existing["y1"])),
+                )
+                union = candidate_area + existing_area - intersection
+                if (
+                    intersection / min(candidate_area, existing_area) >= 0.65
+                    or intersection / max(union, 1) >= 0.35
+                ):
+                    duplicate = True
+                    break
+            if not duplicate:
+                kept.append(candidate)
+        return kept
+
     def detect(self, image: np.ndarray) -> List[dict]:
         if self.model is not None:
             try:
                 results = self.model(image, imgsz=640, conf=0.25, verbose=False)
                 detections: List[dict] = []
+                image_height, image_width = image.shape[:2]
                 for result in results:
                     if not result.boxes:
                         continue
                     for box in result.boxes:
                         x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
                         conf = float(box.conf[0])
+                        box_width = x2 - x1
+                        box_height = y2 - y1
+                        if (
+                            box_width <= 0
+                            or box_height <= 0
+                            or box_width / box_height < 1.35
+                            or box_width * box_height > 0.5 * image_width * image_height
+                        ):
+                            continue
                         detections.append({
                             "x1": x1,
                             "y1": y1,
@@ -109,7 +158,7 @@ class PlateDetector:
                             "method": self.mode,
                         })
                 if detections:
-                    return detections
+                    return self._suppress_duplicate_detections(detections)
             except (OSError, ValueError, RuntimeError) as exc:
                 self.model_error = str(exc)
         return self._detect_with_contours(image)
@@ -123,7 +172,7 @@ class PlateDetector:
             y2 = int(det["y2"])
             cv2.rectangle(output, (x1, y1), (x2, y2), (0, 255, 0), 2)
             confidence = det.get("confidence")
-            label = f"plate {confidence:.2f}" if confidence is not None else "plate (contour)"
+            label = f"BIEN SO {confidence:.2f}" if confidence is not None else "BIEN SO"
             cv2.putText(output, label, (x1, max(0, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         return output
 

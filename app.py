@@ -47,6 +47,7 @@ from database import (
 from ocr_engine import OCRService
 from plate_detector import PlateDetector
 from live_camera import AutomaticPlateProcessor
+from vehicle_detector import VehicleDetector
 
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
@@ -352,6 +353,11 @@ def get_ocr_service() -> OCRService:
     return OCRService()
 
 
+@st.cache_resource(show_spinner=False)
+def get_vehicle_detector() -> VehicleDetector:
+    return VehicleDetector()
+
+
 def save_uploaded_file(uploaded_file) -> str:
     if uploaded_file is None:
         return ""
@@ -565,6 +571,11 @@ def record_live_camera_event(
 def render_live_camera(direction: str) -> None:
     detector = get_plate_detector()
     ocr_service = get_ocr_service()
+    if detector.model_error:
+        st.warning(
+            "Mô hình phát hiện biển số không tải được; đang chuyển sang contour OpenCV. "
+            f"Chi tiết: {detector.model_error}"
+        )
     if not ocr_service._loaded:
         st.error(
             "Không thể bật nhận diện tự động vì OCR chưa sẵn sàng. "
@@ -572,10 +583,22 @@ def render_live_camera(direction: str) -> None:
         )
         return
 
+    with st.spinner("Đang tải mô hình khoanh vùng xe..."):
+        vehicle_detector = get_vehicle_detector()
+    if vehicle_detector.model_error:
+        st.warning(
+            "Mô hình khoanh vùng thân xe chưa tải được; khung xanh biển số vẫn hoạt động. "
+            f"Chi tiết: {vehicle_detector.model_error}"
+        )
+
     st.caption(
-        "Bật camera trình duyệt bằng nút START. App quét video trực tiếp, "
+        "Bật camera trình duyệt bằng nút START. App quét tối đa mỗi 1 giây, "
         "tự lưu biển số đúng định dạng khi OCR đạt từ 65% trong ít nhất 2 lần đọc; "
         "các lượt cùng biển số/hướng trong 25 giây được lọc trùng."
+    )
+    st.caption(
+        "Khung xanh XE khoanh thân xe; khung xanh BIEN SO khoanh biển số. "
+        "Chỉ tự lưu khi thấy cả xe thật lẫn biển số; biển số đang hiển thị trên điện thoại/ảnh sẽ không được ghi."
     )
     context = webrtc_streamer(
         key=f"automatic_plate_camera_{direction}",
@@ -585,6 +608,7 @@ def render_live_camera(direction: str) -> None:
             ocr_service=ocr_service,
             direction=direction,
             record_event=record_live_camera_event,
+            vehicle_detector=vehicle_detector,
         ),
         media_stream_constraints={"video": True, "audio": False},
         async_processing=True,
@@ -914,8 +938,8 @@ def render_overview() -> None:
         st.markdown('<div class="monitor-panel-title">Chi tiết sự kiện</div>', unsafe_allow_html=True)
         if live_camera_mode:
             st.success(
-                "Ghi nhận tự động đang bật. Không cần bấm xác nhận; "
-                "biển số dưới ngưỡng OCR sẽ không được lưu."
+                "Camera quét mỗi 1 giây và tự ghi nhận; không cần bấm xác nhận. "
+                "Biển số dưới ngưỡng OCR sẽ không được lưu."
             )
             st.caption(
                 "Hướng camera: XE VÀO" if live_direction == "IN" else "Hướng camera: XE RA"

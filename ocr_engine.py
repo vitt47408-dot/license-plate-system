@@ -73,6 +73,7 @@ class OCRService:
         normalized = re.sub(r"[^A-Z0-9]", "", text.upper())
         return bool(
             re.fullmatch(r"\d{2}[A-Z]{1,3}\d{4,6}", normalized)
+            or re.fullmatch(r"\d{2}[A-Z]\d{1,2}\d{4,6}", normalized)
             or (
                 7 <= len(normalized) <= 10
                 and re.fullmatch(r"\d{1,2}[A-Z]{1,3}\d{3,6}", normalized)
@@ -95,7 +96,7 @@ class OCRService:
         if not entries:
             return "", 0.0
 
-        line_tolerance = max(8.0, median(entry[2] for entry in entries) * 0.7)
+        line_tolerance = max(8.0, median(entry[2] for entry in entries) * 0.35)
         lines: List[List[tuple]] = []
         for entry in sorted(entries, key=lambda value: (value[1], value[0])):
             matching_line = next(
