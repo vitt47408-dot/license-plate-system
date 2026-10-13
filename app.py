@@ -1272,7 +1272,10 @@ def render_overview() -> None:
         if not scan_results:
             st.info("Không tìm thấy biển số đọc được trong video đã quét.")
         else:
-            st.write(f"Tìm thấy {len(scan_results)} biển số khác nhau. Kiểm tra từng biển số trước khi ghi nhận.")
+            st.write(
+                f"Tìm thấy {len(scan_results)} biển số khác nhau. "
+                "Sửa biển số nếu cần, rồi tích “Đã kiểm tra biển số này” cho từng xe muốn lưu."
+            )
             with st.form(key=f"confirm_video_scan_{video_scan['signature']}"):
                 for index, item in enumerate(scan_results):
                     with st.container(border=True):
@@ -1313,6 +1316,24 @@ def render_overview() -> None:
                 recorded = []
                 skipped = []
                 errors = []
+                selected_count = sum(
+                    bool(
+                        st.session_state.get(
+                            f"video_scan_confirm_{video_scan['signature']}_{index}",
+                            False,
+                        )
+                    )
+                    for index in range(len(scan_results))
+                )
+                if selected_count == 0:
+                    st.session_state["dashboard_video_scan_message"] = {
+                        "recorded": [],
+                        "skipped": [],
+                        "errors": [],
+                        "selection_required": True,
+                    }
+                    st.rerun()
+
                 for index, item in enumerate(scan_results):
                     if not st.session_state.get(
                         f"video_scan_confirm_{video_scan['signature']}_{index}",
@@ -1359,16 +1380,29 @@ def render_overview() -> None:
                     "recorded": recorded,
                     "skipped": skipped,
                     "errors": errors,
+                    "selection_required": False,
                 }
 
             message = st.session_state.get("dashboard_video_scan_message")
             if message:
+                if message.get("selection_required"):
+                    st.warning(
+                        "Chưa chọn biển số nào. Hãy tích “Đã kiểm tra biển số này” "
+                        "cho ít nhất một xe rồi bấm ghi nhận."
+                    )
                 if message["recorded"]:
                     st.success(f"Đã ghi nhận: {', '.join(message['recorded'])}.")
                 if message["skipped"]:
                     st.warning("Không ghi nhận một số biển số: " + " ".join(message["skipped"]))
                 if message["errors"]:
                     st.error("Có lỗi khi lưu: " + " ".join(message["errors"]))
+                if (
+                    not message.get("selection_required")
+                    and not message["recorded"]
+                    and not message["skipped"]
+                    and not message["errors"]
+                ):
+                    st.info("Chưa có sự kiện nào được ghi nhận.")
 
 def render_plate_recognition(
     frame_override: np.ndarray | None = None,
