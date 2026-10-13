@@ -129,6 +129,16 @@ Trong triển khai này, file trọng số `models/plate_detector_yolov8n.pt` đ
 
 **Lưu ý triển khai:** camera trực tiếp sử dụng WebRTC qua HTTPS từ chính thiết bị mở trang. Quyền camera cần được cấp trên trình duyệt; mạng bị chặn WebRTC/STUN có thể ngăn kết nối. Chọn hướng theo vị trí camera vì app không suy ra chiều xe chỉ từ một khung hình. Khung xanh phân biệt **CAR/MOTORCYCLE/BUS/TRUCK** (xe) và **BIEN SO** (biển số); mô hình YOLO COCO cho xe `yolov8n.pt` được tải tự động từ Ultralytics khi bật camera lần đầu, cần kết nối mạng. App chỉ lưu khi thấy xe thật cùng biển số; hai lần OCR phải đúng định dạng phổ biến và confidence từ 65%. Cùng biển số/hướng bị lọc trùng 25 giây. Màn hình đăng nhập dùng chung một mật khẩu; chỉ chia sẻ mật khẩu với người được phép truy cập. SQLite và ảnh bằng chứng được lưu trên ổ đĩa máy chủ; trên hosting có ổ đĩa tạm thời, dữ liệu có thể mất khi máy chủ khởi động lại hoặc triển khai lại. Không dùng làm hệ thống lưu hồ sơ lâu dài nếu chưa chuyển cơ sở dữ liệu/ảnh sang dịch vụ lưu trữ bền vững và có sao lưu.
 
+Nếu camera báo kết nối WebRTC lâu hoặc không có hình trên Streamlit Cloud, mạng hiện tại có thể chặn STUN/UDP. Tạo TURN credentials từ nhà cung cấp TURN tin cậy, rồi thêm các giá trị này vào **Streamlit Cloud > App settings > Secrets** (không đưa credentials vào Git):
+
+```toml
+WEBRTC_TURN_URLS = ["turn:your-turn-server:3478?transport=tcp"]
+WEBRTC_TURN_USERNAME = "your-username"
+WEBRTC_TURN_CREDENTIAL = "your-secret-credential"
+```
+
+Khởi động lại app sau khi lưu secrets. TURN chuyển tiếp luồng video qua nhà cung cấp TURN, nên dùng nhà cung cấp được tin cậy và kiểm tra giới hạn/chi phí dữ liệu. Nếu chưa cấu hình TURN, thử mở app trên mạng khác hoặc hotspot điện thoại.
+
 ## 7. Kiểm thử MVP
 
 ### 7.1. Giám sát trực tiếp và nhận diện

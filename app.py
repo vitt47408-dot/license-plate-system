@@ -74,6 +74,26 @@ PAGE_DETAILS = {
 }
 
 
+def build_rtc_configuration(secrets=None) -> tuple[dict, bool]:
+    secret_values = st.secrets if secrets is None else secrets
+    ice_servers = [{"urls": ["stun:stun.l.google.com:19302"]}]
+    turn_urls = secret_values.get("WEBRTC_TURN_URLS", [])
+    if isinstance(turn_urls, str):
+        turn_urls = [turn_urls]
+    turn_urls = [url.strip() for url in turn_urls if isinstance(url, str) and url.strip()]
+
+    turn_username = str(secret_values.get("WEBRTC_TURN_USERNAME", "")).strip()
+    turn_credential = str(secret_values.get("WEBRTC_TURN_CREDENTIAL", "")).strip()
+    turn_configured = bool(turn_urls and turn_username and turn_credential)
+    if turn_configured:
+        ice_servers.append({
+            "urls": turn_urls,
+            "username": turn_username,
+            "credential": turn_credential,
+        })
+    return {"iceServers": ice_servers}, turn_configured
+
+
 def apply_app_styles() -> None:
     st.markdown(
         """
@@ -642,6 +662,7 @@ def record_live_camera_event(
 
 
 def render_live_camera(direction: str, pair_code: str | None = None) -> None:
+    rtc_configuration, turn_configured = build_rtc_configuration()
     st.caption(
         "Bật camera trình duyệt bằng nút START. App quét tối đa mỗi 1 giây, "
         "tự lưu biển số đúng định dạng khi OCR đạt từ 65% trong ít nhất 2 lần đọc; "
@@ -682,9 +703,7 @@ def render_live_camera(direction: str, pair_code: str | None = None) -> None:
             "audio": False,
         },
         async_processing=True,
-        rtc_configuration={
-            "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
-        },
+        rtc_configuration=rtc_configuration,
     )
     if context.state.playing:
         st.success(
@@ -693,6 +712,18 @@ def render_live_camera(direction: str, pair_code: str | None = None) -> None:
         )
     else:
         st.info("Nhấn START trong khung camera và cho phép trình duyệt truy cập camera.")
+        if not turn_configured:
+            st.warning(
+                "Camera chưa kết nối được qua STUN. Mạng công ty/trường học hoặc một số Wi-Fi "
+                "có thể chặn WebRTC; hiện ứng dụng chưa cấu hình TURN. Thử đổi sang mạng khác "
+                "hoặc thêm TURN credentials vào Streamlit Secrets."
+            )
+            st.code(
+                'WEBRTC_TURN_URLS = ["turn:your-turn-server:3478?transport=tcp"]\n'
+                'WEBRTC_TURN_USERNAME = "your-username"\n'
+                'WEBRTC_TURN_CREDENTIAL = "your-secret-credential"',
+                language="toml",
+            )
 
 
 def render_remote_camera_link() -> None:
@@ -781,9 +812,7 @@ def render_remote_camera_link() -> None:
                 source_video_track=track,
                 media_stream_constraints={"video": False, "audio": False},
                 async_processing=True,
-                rtc_configuration={
-                    "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
-                },
+                rtc_configuration=build_rtc_configuration()[0],
             )
             if context.state.playing:
                 st.success("Đã kết nối luồng camera từ xa.")
