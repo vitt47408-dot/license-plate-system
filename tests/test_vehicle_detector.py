@@ -41,6 +41,8 @@ class VehicleDetectorTests(unittest.TestCase):
 
         self.assertEqual([item["label"] for item in detections], ["CAR", "MOTORCYCLE"])
         self.assertEqual(detector.model.arguments["classes"], [2, 3, 5, 7])
+        self.assertEqual(detector.model.arguments["imgsz"], 480)
+        self.assertEqual(detector.model.arguments["max_det"], 5)
 
     def test_draws_green_boxes_for_detected_vehicle(self):
         detector = VehicleDetector.__new__(VehicleDetector)

@@ -358,6 +358,13 @@ def get_vehicle_detector() -> VehicleDetector:
     return VehicleDetector()
 
 
+def get_live_camera_models() -> tuple[PlateDetector, OCRService, VehicleDetector]:
+    import torch
+
+    torch.set_num_threads(1)
+    return get_plate_detector(), get_ocr_service(), get_vehicle_detector()
+
+
 def save_uploaded_file(uploaded_file) -> str:
     if uploaded_file is None:
         return ""
@@ -587,11 +594,7 @@ def render_live_camera(direction: str) -> None:
             record_event=record_live_camera_event,
             require_vehicle_detection=True,
             background_processing=True,
-            model_loader=lambda: (
-                get_plate_detector(),
-                get_ocr_service(),
-                get_vehicle_detector(),
-            ),
+            model_loader=get_live_camera_models,
         )
 
     context = webrtc_streamer(
@@ -600,9 +603,9 @@ def render_live_camera(direction: str) -> None:
         video_processor_factory=create_processor,
         media_stream_constraints={
             "video": {
-                "width": {"ideal": 1280},
-                "height": {"ideal": 720},
-                "frameRate": {"ideal": 15, "max": 20},
+                "width": {"ideal": 960},
+                "height": {"ideal": 540},
+                "frameRate": {"ideal": 15, "max": 15},
             },
             "audio": False,
         },

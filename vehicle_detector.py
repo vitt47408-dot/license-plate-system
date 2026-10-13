@@ -34,10 +34,10 @@ class VehicleDetector:
         try:
             results = self.model(
                 image,
-                imgsz=640,
+                imgsz=480,
                 conf=0.25,
                 classes=list(self.VEHICLE_CLASSES),
-                max_det=10,
+                max_det=5,
                 verbose=False,
             )
         except (OSError, ValueError, RuntimeError) as exc:
