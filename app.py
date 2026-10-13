@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 import pandas as pd
 import streamlit as st
+from streamlit_webrtc import WebRtcMode, webrtc_streamer
 from PIL import Image
 
 from database import (
@@ -45,6 +46,7 @@ from database import (
 )
 from ocr_engine import OCRService
 from plate_detector import PlateDetector
+from live_camera import AutomaticPlateProcessor
 
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
@@ -531,6 +533,71 @@ def process_confirmed_event(plate: str, direction: str, frame: np.ndarray, sourc
     )
 
 
+def record_live_camera_event(
+    plate: str,
+    direction: str,
+    frame: np.ndarray,
+    confidence: float,
+) -> str:
+    if is_dup_event_recent(plate, direction, seconds=25):
+        return f"{plate}: lượt trùng trong 25 giây đã được lọc."
+
+    event = process_confirmed_event(
+        plate,
+        direction,
+        frame,
+        "live_camera",
+        confidence,
+    )
+    log_audit(
+        "access_event_created",
+        "access_event",
+        str(event["id"]),
+        f"{event['plate_number']} direction={direction} "
+        f"source=live_camera confidence={confidence:.3f} auto=true",
+    )
+    return (
+        f"ĐÃ TỰ GHI NHẬN {event['plate_number']} · "
+        f"{'XE VÀO' if direction == 'IN' else 'XE RA'} · OCR {confidence:.0%}"
+    )
+
+
+def render_live_camera(direction: str) -> None:
+    detector = get_plate_detector()
+    ocr_service = get_ocr_service()
+    if not ocr_service._loaded:
+        st.error(
+            "Không thể bật nhận diện tự động vì OCR chưa sẵn sàng. "
+            f"{ocr_service.load_error or 'Kiểm tra EasyOCR và quyền tải model.'}"
+        )
+        return
+
+    st.caption(
+        "Bật camera trình duyệt bằng nút START. App quét video trực tiếp, "
+        "tự lưu biển số đúng định dạng khi OCR đạt từ 65% trong ít nhất 2 lần đọc; "
+        "các lượt cùng biển số/hướng trong 25 giây được lọc trùng."
+    )
+    context = webrtc_streamer(
+        key=f"automatic_plate_camera_{direction}",
+        mode=WebRtcMode.SENDRECV,
+        video_processor_factory=lambda: AutomaticPlateProcessor(
+            detector=detector,
+            ocr_service=ocr_service,
+            direction=direction,
+            record_event=record_live_camera_event,
+        ),
+        media_stream_constraints={"video": True, "audio": False},
+        async_processing=True,
+        rtc_configuration={
+            "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+        },
+    )
+    if context.state.playing:
+        st.success("Camera đang chạy — biển số hợp lệ sẽ tự ghi vào lịch sử.")
+    else:
+        st.info("Nhấn START trong khung camera và cho phép trình duyệt truy cập camera.")
+
+
 def reset_live_capture() -> None:
     st.session_state.pop("dashboard_capture_bytes", None)
     st.session_state.pop("dashboard_scan_requested", None)
@@ -612,66 +679,21 @@ def render_overview() -> None:
         st.markdown('<div class="monitor-panel-title">Camera giám sát</div>', unsafe_allow_html=True)
         input_source = st.radio(
             "Nguồn hình ảnh",
-            ["Camera máy tính", "Camera điện thoại", "Tải ảnh/video"],
+            ["Camera trực tiếp (tự động)", "Ảnh/video (thủ công)"],
             horizontal=True,
             key="live_input_source",
             on_change=reset_live_capture,
         )
-        if input_source == "Camera máy tính":
-            camera_index = st.number_input(
-                "Camera",
-                min_value=0,
-                max_value=10,
-                value=0,
-                step=1,
-                key="dashboard_camera_index",
+        live_camera_mode = input_source == "Camera trực tiếp (tự động)"
+        if live_camera_mode:
+            live_direction = st.radio(
+                "Hướng của camera",
+                ["IN", "OUT"],
+                horizontal=True,
+                format_func=lambda value: "Chỉ ghi XE VÀO" if value == "IN" else "Chỉ ghi XE RA",
+                key="automatic_camera_direction",
             )
-            if st.button(
-                "Bật camera / Chụp ảnh",
-                type="primary",
-                key="dashboard_capture_camera",
-                use_container_width=True,
-            ):
-                try:
-                    captured_frame = capture_local_camera(int(camera_index))
-                    success, encoded = cv2.imencode(".jpg", captured_frame)
-                    if not success:
-                        raise ValueError("Không mã hóa được ảnh từ camera.")
-                    st.session_state["dashboard_capture_bytes"] = encoded.tobytes()
-                    st.session_state["dashboard_capture_source"] = "local_camera"
-                    st.session_state["dashboard_scan_requested"] = True
-                    st.session_state.pop("dashboard_analysis", None)
-                except (RuntimeError, ValueError) as exc:
-                    st.error(str(exc))
-        elif input_source == "Camera điện thoại":
-            st.caption(
-                "Dùng camera của thiết bị đang mở trang này. Khi deploy, hãy truy cập bằng HTTPS "
-                "và cho phép trình duyệt dùng camera."
-            )
-            phone_capture = st.camera_input(
-                "Chụp ảnh xe bằng điện thoại",
-                key="live_phone_camera_capture",
-            )
-            if phone_capture is not None:
-                try:
-                    photo_bytes = phone_capture.getvalue()
-                    photo_hash = hashlib.sha256(photo_bytes).hexdigest()
-                    upload_key = (photo_hash, None)
-                    if st.session_state.get("dashboard_upload_key") != upload_key:
-                        photo_rgb = np.array(
-                            Image.open(io.BytesIO(photo_bytes)).convert("RGB")
-                        )
-                        phone_frame = cv2.cvtColor(photo_rgb, cv2.COLOR_RGB2BGR)
-                        success, encoded = cv2.imencode(".jpg", phone_frame)
-                        if not success:
-                            raise ValueError("Không mã hóa được ảnh từ camera điện thoại.")
-                        st.session_state["dashboard_capture_bytes"] = encoded.tobytes()
-                        st.session_state["dashboard_capture_source"] = "phone_camera"
-                        st.session_state["dashboard_scan_requested"] = True
-                        st.session_state["dashboard_upload_key"] = upload_key
-                        st.session_state.pop("dashboard_analysis", None)
-                except (OSError, ValueError) as exc:
-                    st.error(f"Không đọc được ảnh từ camera điện thoại: {exc}")
+            render_live_camera(live_direction)
         else:
             uploaded_file = st.file_uploader(
                 "Chọn JPG/PNG hoặc MP4/AVI",
@@ -809,7 +831,7 @@ def render_overview() -> None:
                 )
             else:
                 st.warning("Không phát hiện được biển số trong ảnh. Hãy căn gần và chụp lại.")
-        else:
+        elif not live_camera_mode:
             latest_image = next(
                 (
                     event for event in recent_events
@@ -828,7 +850,30 @@ def render_overview() -> None:
 
     with history_column:
         st.markdown('<div class="monitor-panel-title">Lịch sử xe ra vào vừa qua</div>', unsafe_allow_html=True)
-        if recent_events:
+        if live_camera_mode:
+            @st.fragment(run_every=3)
+            def render_live_history() -> None:
+                live_events = get_recent_events(12)
+                if live_events:
+                    history_rows = [{
+                        "Biển số xe": event["plate_number"],
+                        "Thời gian": event["event_time"],
+                        "Sự kiện": "Xe vào" if event["direction"] == "IN" else "Xe ra",
+                        "Độ tin cậy OCR": f"{float(event.get('confidence') or 0):.0%}",
+                        "Trạng thái": "Đã ghi nhận" if event["status"] == "confirmed" else "Chờ xác minh",
+                    } for event in live_events]
+                    st.dataframe(
+                        pd.DataFrame(history_rows),
+                        use_container_width=True,
+                        hide_index=True,
+                        height=330,
+                    )
+                else:
+                    st.info("Chưa có sự kiện xe ra vào được ghi nhận.")
+
+            render_live_history()
+            selected_event = recent_events[0] if recent_events else None
+        elif recent_events:
             history_rows = [{
                 "Biển số xe": event["plate_number"],
                 "Thời gian": event["event_time"],
@@ -867,7 +912,38 @@ def render_overview() -> None:
 
     with detail_column:
         st.markdown('<div class="monitor-panel-title">Chi tiết sự kiện</div>', unsafe_allow_html=True)
-        if current_analysis and current_analysis["ocr_error"]:
+        if live_camera_mode:
+            st.success(
+                "Ghi nhận tự động đang bật. Không cần bấm xác nhận; "
+                "biển số dưới ngưỡng OCR sẽ không được lưu."
+            )
+            st.caption(
+                "Hướng camera: XE VÀO" if live_direction == "IN" else "Hướng camera: XE RA"
+            )
+
+            @st.fragment(run_every=3)
+            def render_live_camera_events() -> None:
+                live_events = [
+                    event
+                    for event in get_recent_events(100)
+                    if event.get("source_type") == "live_camera"
+                ][:5]
+                if not live_events:
+                    st.info("Sự kiện nhận diện tự động sẽ xuất hiện ở đây.")
+                    return
+                st.dataframe(
+                    pd.DataFrame([{
+                        "Biển số": event["plate_number"],
+                        "Hướng": "Xe vào" if event["direction"] == "IN" else "Xe ra",
+                        "Thời gian": event["event_time"],
+                        "OCR": f"{float(event.get('confidence') or 0):.0%}",
+                    } for event in live_events]),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            render_live_camera_events()
+        elif current_analysis and current_analysis["ocr_error"]:
             st.warning("OCR chưa sẵn sàng; kiểm tra trạng thái mô hình ở Cấu hình.")
         elif current_analysis and current_analysis["detections"] and current_crop is not None:
             plate_key = f"live_confirmed_plate_{current_fingerprint}_{current_result_index}"

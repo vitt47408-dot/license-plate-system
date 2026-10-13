@@ -107,7 +107,7 @@ streamlit run app.py --server.address 0.0.0.0 --server.port 8501
 
 Trên máy tính, chạy `ipconfig`, lấy địa chỉ IPv4 của adapter Wi-Fi, rồi mở `http://<IPv4-của-máy-tính>:8501` trên điện thoại. Ví dụ: `http://192.168.1.25:8501`. Nếu Windows Firewall hỏi, chỉ cho phép trên mạng Private.
 
-Trong trang **Giám sát trực tiếp**, chọn **Camera điện thoại** và cho phép trình duyệt chụp ảnh. Cũng có thể chọn **Tải ảnh/video**. Camera máy tính vẫn hoạt động riêng qua OpenCV trên máy chủ.
+Trong trang **Giám sát trực tiếp**, chọn **Camera trực tiếp (tự động)** và bấm **START** để cấp quyền camera. App nhận video liên tục từ chính thiết bị mở trang; không dùng camera server để thay camera điện thoại.
 
 #### Deploy lên máy chủ có HTTPS
 
@@ -122,19 +122,20 @@ Với Streamlit Community Cloud:
    ```
 
    Không lưu mật khẩu này trong mã nguồn hoặc commit `secrets.toml`. App sẽ không khởi chạy nếu chưa cấu hình mật khẩu.
-4. Bấm **Deploy** và đợi dịch vụ cấp URL HTTPS. Mở URL trên điện thoại, đăng nhập, vào **Giám sát trực tiếp > Camera điện thoại**, rồi cấp quyền camera cho trình duyệt.
+4. Bấm **Deploy** và đợi dịch vụ cấp URL HTTPS. Mở URL trên điện thoại, đăng nhập, vào **Giám sát trực tiếp > Camera trực tiếp (tự động)**, chọn hướng camera và bấm **START**.
 
 Trong triển khai này, file trọng số `models/plate_detector_yolov8n.pt` được giữ lại để detector YOLO hoạt động; thư mục dữ liệu huấn luyện và checkpoint phụ không được đưa lên. Nếu repository không thể chứa trọng số, tải nó lên nơi lưu trữ phù hợp và cấu hình bước tải trọng số trước khi chạy app.
 
-**Lưu ý triển khai:** camera máy tính qua OpenCV là camera gắn với máy chủ, không phải camera điện thoại. Ảnh chụp bằng camera điện thoại được gửi về app để xử lý nhận diện. Màn hình đăng nhập dùng chung một mật khẩu; chỉ chia sẻ mật khẩu với người được phép truy cập. SQLite và ảnh bằng chứng được lưu trên ổ đĩa máy chủ; trên hosting có ổ đĩa tạm thời, dữ liệu có thể mất khi máy chủ khởi động lại hoặc triển khai lại. Không dùng làm hệ thống lưu hồ sơ lâu dài nếu chưa chuyển cơ sở dữ liệu/ảnh sang dịch vụ lưu trữ bền vững và có sao lưu.
+**Lưu ý triển khai:** camera trực tiếp sử dụng WebRTC qua HTTPS từ chính thiết bị mở trang. Quyền camera cần được cấp trên trình duyệt; mạng bị chặn WebRTC/STUN có thể ngăn kết nối. Chọn hướng theo vị trí camera vì app không suy ra chiều xe chỉ từ một khung hình. Biển số được tự ghi sau ít nhất hai lần OCR nhất định, đúng định dạng phổ biến và confidence từ 65%; cùng biển số/hướng bị lọc trùng 25 giây. Màn hình đăng nhập dùng chung một mật khẩu; chỉ chia sẻ mật khẩu với người được phép truy cập. SQLite và ảnh bằng chứng được lưu trên ổ đĩa máy chủ; trên hosting có ổ đĩa tạm thời, dữ liệu có thể mất khi máy chủ khởi động lại hoặc triển khai lại. Không dùng làm hệ thống lưu hồ sơ lâu dài nếu chưa chuyển cơ sở dữ liệu/ảnh sang dịch vụ lưu trữ bền vững và có sao lưu.
 
 ## 7. Kiểm thử MVP
 
 ### 7.1. Giám sát trực tiếp và nhận diện
-- Vào **Giám sát trực tiếp** và chọn **Camera máy tính** để chụp webcam qua OpenCV, hoặc **Camera điện thoại** để chụp bằng thiết bị đang mở trang.
-- Camera trên điện thoại cần quyền trình duyệt; khi chạy qua mạng/Internet nên dùng HTTPS. OpenCV chỉ nhìn thấy webcam của máy chạy app.
-- Nếu camera không mở, kiểm tra số camera, đóng ứng dụng khác đang chiếm webcam và kiểm tra quyền camera của Windows tại **Settings > Privacy & security > Camera**.
-- Chọn **Tải ảnh/video** trong mục nguồn đầu vào khi dùng nhận diện bằng tệp.
+- Vào **Giám sát trực tiếp**, chọn **Camera trực tiếp (tự động)**, chọn hướng **XE VÀO/XE RA**, bấm **START** và cấp quyền camera. Video được nhận diện liên tục từ webcam hoặc camera điện thoại của thiết bị đang mở trang.
+- App tự lưu khi OCR đạt ngưỡng lọc; không cần xác nhận từng biển số. Kiểm tra danh sách sự kiện tự động để rà lại kết quả vì OCR vẫn có thể đọc sai.
+- Camera trực tiếp cần HTTPS và kết nối WebRTC; firewall/mạng chặn STUN có thể ngăn truyền video.
+- Nếu camera không mở, kiểm tra quyền camera của trình duyệt/Windows tại **Settings > Privacy & security > Camera**, rồi thử tải lại trang và bấm START lần nữa.
+- Có thể chọn **Ảnh/video (thủ công)** nếu cần quét riêng tệp; đây là luồng riêng, không thay cho camera trực tiếp.
 - Với video, thanh trượt chỉ nhận diện khung hình đang chọn. Để tìm nhiều biển số trong clip, bấm **Quét tìm biển số trong toàn video**; ứng dụng lấy mẫu tối đa 2 khung hình/giây (không quá 300 khung hình), gộp kết quả trùng nhau rồi yêu cầu kiểm tra từng biển số, chọn hướng và xác nhận trước khi lưu. Video dài hoặc biển số nhỏ/mờ có thể cần thử một khung hình khác.
 - OCR thử ảnh màu, grayscale và tăng tương phản; nếu crop nhỏ hơn khoảng 80×32 px, hãy chọn khung rõ hơn hoặc đưa camera lại gần/lấy nét. Phóng lớn bằng phần mềm không thể khôi phục chi tiết không có trong ảnh; confidence của detector cũng không xác nhận rằng khung đó thực sự chứa biển số.
 - Hệ thống hiển thị:
@@ -142,8 +143,7 @@ Trong triển khai này, file trọng số `models/plate_detector_yolov8n.pt` đ
   - bảng lịch sử xe ra/vào ở giữa
   - thẻ **Chi tiết sự kiện** bên phải với biển số, thời gian, hướng di chuyển, độ tin cậy OCR và thông tin đăng ký
   - ô xác nhận/sửa biển số trước khi lưu
-- Chọn vùng biển số đúng, xác nhận/sửa ký tự, chọn hướng XE VÀO/XE RA và lưu sự kiện kèm ảnh minh chứng, hoặc mở phần hồ sơ xe để thêm/cập nhật thông tin.
-- Phải đánh dấu đã kiểm tra biển số trước khi lưu sự kiện từ nhận diện; kết quả OCR không tự được xem là kết luận.
+- Với **Ảnh/video (thủ công)**, chọn vùng biển số, xác nhận/sửa ký tự, chọn hướng XE VÀO/XE RA và lưu sự kiện; camera trực tiếp tự lọc/lưu theo ngưỡng, không yêu cầu xác nhận.
 - Dashboard tính **Tổng xe trong bãi** từ lượt vào/ra đã xác nhận và **Xe vào hôm nay** từ lịch sử trong ngày. Đặt sức chứa tại **Cấu hình > Sức chứa khu vực** để tính **Chỗ trống**; nếu chưa đặt, ứng dụng không tự bịa sức chứa.
 
 ### 7.2. Tải video
@@ -152,10 +152,8 @@ Trong triển khai này, file trọng số `models/plate_detector_yolov8n.pt` đ
 - Mỗi biển số khác nhau chỉ xuất hiện một lần trong danh sách quét; các lần đọc trùng được gộp lại. Quét không thay thế việc người vận hành xác minh hướng và nội dung biển số.
 
 ### 7.3. Lưu lịch sử xe vào/ra
-- Vào **Giám sát trực tiếp** và chụp ảnh từ webcam hoặc tải ảnh/video.
-- Chọn IN/OUT.
-- Nhập biển số.
-- Xác nhận/sửa biển số rồi xác nhận sự kiện; ảnh camera được lưu làm bằng chứng.
+- Với camera trực tiếp, chọn hướng camera IN/OUT; ứng dụng tự lọc OCR và ghi biển số hợp lệ cùng ảnh bằng chứng.
+- Ảnh/video tải lên vẫn cần kiểm tra và xác nhận thủ công.
 - Hệ thống lưu vào SQLite và ngăn ghi trùng khung hình liên tiếp.
 - Lịch sử và thẻ chi tiết sự kiện hiển thị ở màn hình giám sát; các sự kiện cần xác minh không được tính vào trạng thái xe trong khu vực.
 
@@ -304,8 +302,8 @@ pip install easyocr
 ### Điện thoại không mở được camera
 
 - Mở trang bằng HTTPS khi truy cập từ máy chủ deploy; cấp quyền camera cho trình duyệt.
-- Khi chạy trong Wi-Fi nội bộ bằng HTTP, một số trình duyệt/thiết bị có thể không cho truy cập camera. Thử **Tải ảnh/video** hoặc dùng URL HTTPS.
-- Camera điện thoại chỉ khả dụng khi chọn **Camera điện thoại**; lựa chọn **Camera máy tính** mở webcam của máy chủ.
+- Khi chạy trong Wi-Fi nội bộ bằng HTTP, một số trình duyệt/thiết bị có thể không cho truy cập camera. Dùng URL HTTPS.
+- Camera trực tiếp dùng camera của thiết bị đang mở trang và cần WebRTC; camera không phải thiết bị gắn với máy chủ.
 
 ## 11. Ghi chú về khả năng triển khai thực tế
 
