@@ -1,0 +1,23 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+# Keep local database, evidence, uploads, and exports out of public repositories.
+license_plate.db
+license_plate.db-*
+uploads/*
+!uploads/.gitkeep
+evidence/*
+!evidence/.gitkeep
+exports/*
+!exports/.gitkeep
+
+# Training data and run checkpoints are local and can be very large.
+datasets/
+runs/
+
+# Keep only the detector checkpoint used by the application.
+models/*.pt
+!models/plate_detector_yolov8n.pt
+
+.streamlit/secrets.toml
