@@ -95,50 +95,56 @@ class AutomaticPlateProcessorTests(unittest.TestCase):
         self.processor.process(self.frame, now=7.0)
         self.assertEqual(len(self.recorded), 1)
 
-    def test_does_not_auto_save_a_plate_without_a_detected_vehicle(self):
+    def test_records_reliably_read_plate_when_vehicle_roi_is_not_detected(self):
         self.processor.vehicle_detector = NoVehicleDetector()
 
         self.processor.process(self.frame, now=1.0)
         self.processor.process(self.frame, now=2.0)
 
-        self.assertEqual(self.recorded, [])
+        self.assertEqual(len(self.recorded), 1)
+        self.assertEqual(self.recorded[0][0:2], ("51A12345", "IN"))
         self.assertEqual(
             self.processor._status,
-            "PLATE ROI · WAITING FOR VEHICLE ROI",
+            "PLATE ROI · AUTO-SAVED",
         )
 
-    def test_requires_vehicle_detector_when_configured_for_live_app(self):
+    def test_records_reliably_read_plate_when_vehicle_detector_is_unavailable(self):
+        self.processor.vehicle_detector = None
+
+        self.processor.process(self.frame, now=1.0)
+        self.processor.process(self.frame, now=2.0)
+
+        self.assertEqual(len(self.recorded), 1)
+
+    def test_explains_when_detected_plate_is_not_confirmed_by_ocr(self):
+        self.processor.ocr_service = FakeOCR(confidence=0.5)
+        self.processor.process(self.frame, now=1.0)
+
+        self.assertEqual(self.recorded, [])
+        self.assertEqual(
+            self.processor.status,
+            "GREEN ROI · OCR LOW / PLATE NOT CONFIRMED",
+        )
+        self.assertTrue(any("OCR chưa xác nhận" in message for message in self.processor.messages))
+
+    def test_vehicle_model_failure_does_not_block_confirmed_plate(self):
+        class FailedVehicleDetector(NoVehicleDetector):
+            model_error = "weight download failed"
+
         recorded = []
         processor = AutomaticPlateProcessor(
             detector=FakeDetector(),
             ocr_service=FakeOCR(),
             direction="IN",
             record_event=lambda *args: recorded.append(args) or "saved",
-            require_vehicle_detection=True,
-        )
-
-        processor.process(self.frame, now=1.0)
-
-        self.assertEqual(recorded, [])
-        self.assertIn("AUTO-SAVE DISABLED", processor._status)
-
-    def test_explains_when_cloud_vehicle_weights_are_missing(self):
-        class FailedVehicleDetector(NoVehicleDetector):
-            model_error = "weight download failed"
-
-        processor = AutomaticPlateProcessor(
-            detector=FakeDetector(),
-            ocr_service=FakeOCR(),
-            direction="IN",
-            record_event=lambda *args: "saved",
             vehicle_detector=FailedVehicleDetector(),
-            require_vehicle_detection=True,
         )
 
         processor.process(self.frame, now=1.0)
+        processor.process(self.frame, now=2.0)
 
-        self.assertEqual(processor.status, "VEHICLE MODEL FAILED · AUTO-SAVE DISABLED")
-        self.assertTrue(any("model xe không tải được" in message for message in processor.messages))
+        self.assertEqual(len(recorded), 1)
+        self.assertTrue(any("weight download failed" in message for message in processor.messages))
 
     def test_defers_model_loading_until_first_camera_frame(self):
         loaded = []

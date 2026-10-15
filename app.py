@@ -701,7 +701,6 @@ def render_live_camera(direction: str, pair_code: str | None = None) -> None:
             ocr_service=None,
             direction=direction,
             record_event=record_live_camera_event,
-            require_vehicle_detection=True,
             background_processing=True,
             frame_publisher=frame_publisher,
             model_loader=get_live_camera_models,

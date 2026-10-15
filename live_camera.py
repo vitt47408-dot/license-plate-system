@@ -25,7 +25,6 @@ class AutomaticPlateProcessor:
         scan_interval: float = 1.0,
         consensus_window: float = 4.0,
         model_loader: Callable[[], tuple[object, object, object]] | None = None,
-        require_vehicle_detection: bool = False,
         background_processing: bool = False,
         frame_publisher: Callable[[np.ndarray], None] | None = None,
     ) -> None:
@@ -35,7 +34,6 @@ class AutomaticPlateProcessor:
         self.record_event = record_event
         self.vehicle_detector = vehicle_detector
         self.model_loader = model_loader
-        self.require_vehicle_detection = require_vehicle_detection
         self.background_processing = background_processing
         self.frame_publisher = frame_publisher
         self._models_loaded = model_loader is None
@@ -110,16 +108,6 @@ class AutomaticPlateProcessor:
             self._last_vehicle_detections = []
             return
 
-        if self.require_vehicle_detection and self.vehicle_detector is None:
-            self._status = "VEHICLE MODEL UNAVAILABLE · AUTO-SAVE DISABLED"
-            self._add_message(
-                "SYSTEM",
-                "Không có mô hình xe; khung thân xe và tự ghi nhận đang bị khóa.",
-            )
-            self._last_detections = []
-            self._last_vehicle_detections = []
-            return
-
         detections = self.detector.detect(frame)
         self._last_detections = detections
         vehicle_detections = (
@@ -140,19 +128,6 @@ class AutomaticPlateProcessor:
                     key,
                     f"Mô hình {label} báo lỗi: {model_error}",
                 )
-        if self.require_vehicle_detection and not vehicle_detections:
-            vehicle_error = str(
-                getattr(self.vehicle_detector, "model_error", "") or ""
-            )
-            if vehicle_error:
-                self._status = "VEHICLE MODEL FAILED · AUTO-SAVE DISABLED"
-                self._add_message(
-                    "SYSTEM",
-                    "Chưa phát hiện xe vì model xe không tải được; cần kết nối mạng để tải yolov8n.pt.",
-                )
-                self._last_detections = []
-                self._last_vehicle_detections = []
-                return
         self._status = (
             f"PLATE ROI: {len(detections)} · VEHICLE ROI: {len(vehicle_detections)} · 1s"
             if detections
@@ -166,10 +141,10 @@ class AutomaticPlateProcessor:
 
         if self.vehicle_detector and not vehicle_detections:
             if detections:
-                self._status = "PLATE ROI · WAITING FOR VEHICLE ROI"
+                self._status = "PLATE ROI · VEHICLE ROI NOT FOUND · VERIFYING OCR"
             else:
                 self._status = "NO VEHICLE ROI · AUTO-SAVE DISABLED"
-            return
+                return
 
         for detection in detections:
             crop = self.detector.crop_plate(frame, detection)
@@ -181,6 +156,16 @@ class AutomaticPlateProcessor:
                 or confidence < self.minimum_confidence
                 or len(plate) < 5
             ):
+                if result.get("text") or result.get("error"):
+                    detail = str(
+                        result.get("error")
+                        or "Độ tin cậy OCR chưa đạt mức yêu cầu."
+                    )
+                    self._add_message(
+                        "OCR",
+                        f"OCR chưa xác nhận: {result.get('text') or 'không đọc được'} "
+                        f"({confidence:.0%}). {detail}",
+                    )
                 continue
 
             if plate in active_plates:
