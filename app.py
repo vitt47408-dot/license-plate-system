@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
 import base64
 import io
 import shutil
@@ -18,6 +17,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from PIL import Image
+from streamlit.errors import StreamlitSecretNotFoundError
 
 from camera_relay import camera_relay
 from browser_camera_component import browser_camera
@@ -355,32 +355,6 @@ def apply_app_styles() -> None:
         """,
         unsafe_allow_html=True,
     )
-
-
-def require_app_password() -> None:
-    try:
-        configured_password = str(st.secrets["APP_PASSWORD"])
-    except (KeyError, FileNotFoundError):
-        st.error("Chưa cấu hình APP_PASSWORD trong Streamlit Secrets. Hãy cấu hình bí mật trước khi sử dụng app.")
-        st.stop()
-
-    if len(configured_password) < 12:
-        st.error("APP_PASSWORD phải có ít nhất 12 ký tự.")
-        st.stop()
-
-    if st.session_state.get("authenticated"):
-        return
-
-    st.title("Đăng nhập hệ thống")
-    with st.form("app_login"):
-        entered_password = st.text_input("Mật khẩu", type="password")
-        submitted = st.form_submit_button("Đăng nhập", type="primary")
-    if submitted:
-        if hmac.compare_digest(entered_password, configured_password):
-            st.session_state["authenticated"] = True
-            st.rerun()
-        st.error("Mật khẩu không đúng.")
-    st.stop()
 
 
 def ensure_dirs() -> None:
@@ -2943,18 +2917,18 @@ def main() -> None:
         initial_sidebar_state="auto",
     )
     apply_app_styles()
-    configure_database(str(st.secrets.get("DATABASE_URL", "")))
-    configure_object_storage(st.secrets)
-    require_app_password()
+    try:
+        app_secrets = dict(st.secrets)
+    except StreamlitSecretNotFoundError:
+        app_secrets = {}
+    configure_database(str(app_secrets.get("DATABASE_URL", "")))
+    configure_object_storage(app_secrets)
     ensure_dirs()
     init_db()
     if st.session_state.get("main_page") not in PAGE_DETAILS:
         st.session_state["main_page"] = "Giám sát trực tiếp"
 
     with st.sidebar:
-        if st.button("Đăng xuất", use_container_width=True):
-            st.session_state.pop("authenticated", None)
-            st.rerun()
         st.markdown(
             """
             <div class="brand-card">

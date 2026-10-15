@@ -85,8 +85,6 @@ Hệ thống sẽ tự động dùng fallback OpenCV contour detection và EasyO
 streamlit run app.py
 ```
 
-Trước lần chạy đầu tiên, tạo `.streamlit\secrets.toml` với nội dung `APP_PASSWORD = "mat-khau-rieng-dai-it-nhat-12-ky-tu"`; file này đã được Git bỏ qua.
-
 Mở browser tại địa chỉ hiển thị trong terminal, ví dụ:
 
 ```text
@@ -116,25 +114,17 @@ Với Streamlit Community Cloud:
 1. Đưa mã nguồn lên một repository GitHub; không đưa `.venv`, `datasets`, `runs`, `license_plate.db`, ảnh trong `evidence`/`uploads` hoặc thông tin bí mật lên repository. File `.gitignore` trong dự án đã loại các dữ liệu này khỏi những lần thêm file mới.
 2. Mở [share.streamlit.io](https://share.streamlit.io/), đăng nhập bằng GitHub, chọn **Create app**, rồi chọn repository, branch và `app.py`.
    Repository có `packages.txt` để cài thư viện hệ thống OpenCV cần trên Linux; sau khi thay đổi file này, dùng **Reboot app** để Cloud cài lại dependency.
-3. Trước khi deploy, mở **Advanced settings > Secrets** và đặt mật khẩu riêng, dài ít nhất 12 ký tự:
-
-   ```toml
-   APP_PASSWORD = "thay-bang-mat-khau-dai-va-rieng-cua-ban"
-   ```
-
-   Không lưu mật khẩu này trong mã nguồn hoặc commit `secrets.toml`. App sẽ không khởi chạy nếu chưa cấu hình mật khẩu.
-4. Bấm **Deploy** và đợi dịch vụ cấp URL HTTPS. Mở URL trên điện thoại, đăng nhập, vào **Giám sát trực tiếp > Camera trực tiếp (tự động)**, chọn hướng camera và bấm **Bật camera**.
+3. Bấm **Deploy** và đợi dịch vụ cấp URL HTTPS. Mở URL trên điện thoại, vào **Giám sát trực tiếp > Camera trực tiếp (tự động)**, chọn hướng camera và bấm **Bật camera**.
 
 Trong triển khai này, file trọng số `models/plate_detector_yolov8n.pt` được giữ lại để detector YOLO hoạt động; thư mục dữ liệu huấn luyện và checkpoint phụ không được đưa lên. Các mô hình AI chỉ được khởi tạo sau khi bật camera để trang giám sát không phải tải chúng ngay khi mở. Nếu repository không thể chứa trọng số, tải nó lên nơi lưu trữ phù hợp và cấu hình bước tải trọng số trước khi chạy app.
 
-**Lưu ý triển khai:** camera trình duyệt cần HTTPS và quyền camera. Hình ảnh được gửi đến ứng dụng qua kết nối HTTPS/WebSocket hiện có, không dùng WebRTC, STUN hoặc TURN; máy chủ nhận khung hình khoảng mỗi 1,1 giây và xử lý nhận diện trên app. Điều này tốn băng thông và tài nguyên máy chủ hơn truyền video trực tiếp. Chọn hướng theo vị trí camera vì app không suy ra chiều xe chỉ từ một khung hình. Khung xanh phân biệt **CAR/MOTORCYCLE/BUS/TRUCK** (xe) và **BIEN SO** (biển số). Khi không có `models/yolov8n.pt`, ứng dụng yêu cầu Ultralytics tự tải trọng số xe chính thức `yolov8n.pt` vào máy chủ; lần khởi động đầu cần Internet. App chỉ lưu khi phát hiện được cả xe lẫn biển số; hai lần OCR phải đúng định dạng phổ biến và confidence từ 65%. Cùng biển số/hướng bị lọc trùng 25 giây. Màn hình đăng nhập dùng chung một mật khẩu; chỉ chia sẻ mật khẩu với người được phép truy cập.
+**Lưu ý triển khai:** app không có đăng nhập/mật khẩu. Ai biết URL Cloud có thể truy cập, xem và thao tác dữ liệu (bao gồm hồ sơ xe, lịch sử, ảnh, backup/restore và huấn luyện); chỉ chia sẻ URL với người được phép. Camera trình duyệt cần HTTPS và quyền camera. Hình ảnh được gửi đến ứng dụng qua kết nối HTTPS/WebSocket hiện có, không dùng WebRTC, STUN hoặc TURN; máy chủ nhận khung hình khoảng mỗi 1,1 giây và xử lý nhận diện trên app. Điều này tốn băng thông và tài nguyên máy chủ hơn truyền video trực tiếp. Chọn hướng theo vị trí camera vì app không suy ra chiều xe chỉ từ một khung hình. Khung xanh phân biệt **CAR/MOTORCYCLE/BUS/TRUCK** (xe) và **BIEN SO** (biển số). Khi không có `models/yolov8n.pt`, ứng dụng yêu cầu Ultralytics tự tải trọng số xe chính thức `yolov8n.pt` vào máy chủ; lần khởi động đầu cần Internet. App chỉ lưu khi phát hiện được cả xe lẫn biển số; hai lần OCR phải đúng định dạng phổ biến và confidence từ 65%. Cùng biển số/hướng bị lọc trùng 25 giây.
 
 #### Lưu dữ liệu bền vững trên Streamlit Cloud (tùy chọn)
 
 SQLite và filesystem vẫn được dùng mặc định khi không cấu hình dịch vụ bên ngoài. Để dữ liệu không mất khi Cloud khởi động lại, thêm các Secrets sau tại **App settings > Secrets**. Không đưa secrets vào Git hoặc gửi qua chat:
 
 ```toml
-APP_PASSWORD = "mat-khau-rieng-dai-it-nhat-12-ky-tu"
 DATABASE_URL = "PASTE_YOUR_PROVIDER_POSTGRES_CONNECTION_URI"
 
 S3_BUCKET = "ten-bucket"
