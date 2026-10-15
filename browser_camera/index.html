@@ -168,6 +168,14 @@
           }
         }
 
+        function updateHeight() {
+          const shell = document.querySelector(".camera-shell");
+          const h = shell ? Math.ceil(shell.getBoundingClientRect().height) : 280;
+          post("streamlit:setFrameHeight", { height: Math.max(120, h + 8) });
+        }
+
+        video.addEventListener("loadedmetadata", updateHeight);
+        window.addEventListener("resize", updateHeight);
         button.addEventListener("click", startCamera);
         window.addEventListener("message", (event) => {
           if (event.source !== window.parent || event.data?.type !== "streamlit:render") return;
@@ -175,9 +183,10 @@
           maxWidth = Math.max(320, Math.min(960, Number(args.maxWidth) || 640));
           captureIntervalMs = Math.max(800, Number(args.captureIntervalMs) || 1100);
           cameraFacingMode = args.cameraFacingMode === "user" ? "user" : "environment";
-          post("streamlit:setFrameHeight", { height: 420 });
+          updateHeight();
         });
         post("streamlit:componentReady", { apiVersion: 1 });
+        window.setTimeout(updateHeight, 200);
       })();
     </script>
   </body>

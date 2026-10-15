@@ -54,7 +54,7 @@ class PlateDetector:
             if area < 0.005 * width * height:
                 continue
             aspect_ratio = float(w) / float(h)
-            if aspect_ratio < 1.7 or aspect_ratio > 8.0:
+            if aspect_ratio < 0.70 or aspect_ratio > 6.5:
                 continue
             if x < 0 or y < 0 or x + w > width or y + h > height:
                 continue
@@ -142,11 +142,13 @@ class PlateDetector:
                         conf = float(box.conf[0])
                         box_width = x2 - x1
                         box_height = y2 - y1
+                        aspect_ratio = box_width / max(1, box_height)
                         if (
                             box_width <= 0
                             or box_height <= 0
-                            or box_width / box_height < 1.35
-                            or box_width * box_height > 0.5 * image_width * image_height
+                            or aspect_ratio < 0.70
+                            or aspect_ratio > 6.5
+                            or box_width * box_height > 0.65 * image_width * image_height
                         ):
                             continue
                         detections.append({

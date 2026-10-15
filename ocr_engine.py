@@ -73,7 +73,7 @@ class OCRService:
         normalized = re.sub(r"[^A-Z0-9]", "", text.upper())
         return bool(
             re.fullmatch(r"\d{2}[A-Z]{1,3}\d{4,6}", normalized)
-            or re.fullmatch(r"\d{2}[A-Z]\d{1,2}\d{4,6}", normalized)
+            or re.fullmatch(r"\d{2}[A-Z]{1,2}\d{1,2}\d{4,6}", normalized)
             or (
                 7 <= len(normalized) <= 10
                 and re.fullmatch(r"\d{1,2}[A-Z]{1,3}\d{3,6}", normalized)
@@ -91,12 +91,13 @@ class OCRService:
             points = np.asarray(item[0], dtype=np.float32)
             center_x = float(points[:, 0].mean())
             center_y = float(points[:, 1].mean())
-            text_height = float(points[:, 1].max() - points[:, 1].min())
+            _, (width, height), _ = cv2.minAreaRect(points)
+            text_height = min(width, height)
             entries.append((center_x, center_y, max(text_height, 1.0), text, float(item[2])))
         if not entries:
             return "", 0.0
 
-        line_tolerance = max(8.0, median(entry[2] for entry in entries) * 0.35)
+        line_tolerance = max(10.0, median(entry[2] for entry in entries) * 0.55)
         lines: List[List[tuple]] = []
         for entry in sorted(entries, key=lambda value: (value[1], value[0])):
             matching_line = next(

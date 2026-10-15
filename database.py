@@ -872,3 +872,150 @@ def export_history_excel(date_from: str, date_to: str, output_path: str) -> str:
     df = pd.DataFrame(list_events_range(date_from, date_to))
     df.to_excel(output_path, index=False)
     return output_path
+
+
+def get_latest_entry_event(plate_number: str) -> Optional[Dict[str, Any]]:
+    plate = normalize_plate(plate_number)
+    if not plate:
+        return None
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM access_events
+            WHERE plate_number = ? AND direction = 'IN' AND status = 'confirmed'
+            ORDER BY datetime(event_time) DESC, id DESC
+            LIMIT 1
+            """,
+            (plate,),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def calculate_parking_fee(plate_number: str, exit_time_str: Optional[str] = None) -> Dict[str, Any]:
+    plate = normalize_plate(plate_number)
+    if not plate:
+        return {
+            "fee": 0,
+            "fee_str": "0 đ",
+            "duration_str": "Chưa xác định",
+            "fee_reason": "Không có thông tin biển số",
+            "is_free": True,
+            "entry_event": None,
+        }
+
+    veh = get_vehicle_by_plate(plate)
+    entry = get_latest_entry_event(plate)
+    if veh and veh.get("is_registered") and veh.get("is_allowed"):
+        return {
+            "fee": 0,
+            "fee_str": "0 đ (Miễn phí)",
+            "duration_str": "Vé tháng / Cư dân",
+            "fee_reason": "Xe đã đăng ký cấp quyền",
+            "is_free": True,
+            "entry_event": entry,
+        }
+
+    now = datetime.now()
+    exit_dt = now
+    if exit_time_str:
+        try:
+            exit_dt = datetime.strptime(exit_time_str, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            pass
+
+    entry_dt = None
+    if entry and entry.get("event_time"):
+        try:
+            entry_dt = datetime.strptime(entry["event_time"], "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            pass
+
+    # Guess vehicle category (car vs bike)
+    is_car = False
+    if veh and veh.get("vehicle_type"):
+        is_car = veh["vehicle_type"].lower() in {"car", "ô tô", "oto", "truck", "xe tải", "xe tai", "bus"}
+    else:
+        if re.match(r"^\d{2}[A-Z]\d{1}[A-Z0-9]?\d{4,5}$", plate) or re.match(r"^\d{2}[A-Z]{2}\d{4,6}$", plate):
+            is_car = False
+        elif re.match(r"^\d{2}[A-Z]\d{4,5}$", plate):
+            is_car = True
+
+    if not entry_dt or exit_dt < entry_dt:
+        if is_car:
+            return {
+                "fee": 25000,
+                "fee_str": "25.000 đ",
+                "duration_str": "Lượt vào",
+                "fee_reason": "Vé lượt ô tô",
+                "is_free": False,
+                "entry_event": entry,
+            }
+        else:
+            fee = 5000 if 6 <= exit_dt.hour < 18 else 10000
+            fee_reason = "Vé ngày xe máy" if fee == 5000 else "Vé đêm xe máy"
+            return {
+                "fee": fee,
+                "fee_str": f"{fee:,.0f} đ".replace(",", "."),
+                "duration_str": "Lượt vào",
+                "fee_reason": fee_reason,
+                "is_free": False,
+                "entry_event": entry,
+            }
+
+    delta = exit_dt - entry_dt
+    total_minutes = max(1, int(delta.total_seconds() / 60))
+    hours = total_minutes // 60
+    mins = total_minutes % 60
+    duration_str = f"{hours}h {mins}m" if hours > 0 else f"{mins} phút"
+
+    if is_car:
+        if total_minutes <= 120:
+            fee = 25000
+            fee_reason = "Ô tô (Dưới 2 giờ)"
+        else:
+            add_hours = math.ceil((total_minutes - 120) / 60)
+            fee = 25000 + add_hours * 10000
+            fee_reason = f"Ô tô ({hours}h {mins}m)"
+    else:
+        if total_minutes < 720 and entry_dt.date() == exit_dt.date() and 6 <= exit_dt.hour < 18:
+            fee = 5000
+            fee_reason = "Xe máy (Ban ngày)"
+        elif total_minutes < 1440:
+            fee = 10000
+            fee_reason = "Xe máy (Ban đêm / Qua đêm)"
+        else:
+            days = math.ceil(total_minutes / 1440)
+            fee = days * 15000
+            fee_reason = f"Xe máy ({days} ngày)"
+
+    return {
+        "fee": fee,
+        "fee_str": f"{fee:,.0f} đ".replace(",", "."),
+        "duration_str": duration_str,
+        "duration_minutes": total_minutes,
+        "fee_reason": fee_reason,
+        "is_free": False,
+        "entry_event": entry,
+    }
+
+
+def get_vietqr_url(
+    plate_number: str,
+    amount: int,
+    bank_code: str = "MB",
+    account_no: str = "0987654321",
+    account_name: str = "VMS SMART PARKING",
+) -> str:
+    if amount <= 0:
+        return ""
+    clean_plate = normalize_plate(plate_number)
+    info = f"DO XE {clean_plate}"
+    import urllib.parse
+    encoded_info = urllib.parse.quote(info)
+    encoded_name = urllib.parse.quote(account_name)
+    return f"https://img.vietqr.io/image/{bank_code}-{account_no}-compact2.png?amount={amount}&addInfo={encoded_info}&accountName={encoded_name}"
+

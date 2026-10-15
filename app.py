@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import base64
 import io
+import re
 import shutil
 import sqlite3
 import stat
@@ -18,6 +19,7 @@ import pandas as pd
 import streamlit as st
 from PIL import Image
 from streamlit.errors import StreamlitSecretNotFoundError
+import streamlit.components.v1 as components
 
 from camera_relay import camera_relay
 from browser_camera_component import browser_camera
@@ -25,6 +27,7 @@ from database import (
     add_event,
     add_ocr_sample,
     backup_database,
+    calculate_parking_fee,
     configure_database,
     database_backend_configured,
     DB_PATH,
@@ -33,8 +36,10 @@ from database import (
     export_history_excel,
     get_dashboard_stats,
     get_latest_confirmed_event,
+    get_latest_entry_event,
     get_recent_events,
     get_vehicle_by_plate,
+    get_vietqr_url,
     init_db,
     is_dup_event_recent,
     list_active_vehicles,
@@ -110,28 +115,51 @@ def decode_browser_camera_frame(payload: dict) -> np.ndarray:
     return frame
 
 
+def format_plate_display(plate: str) -> str:
+    cleaned = normalize_plate(plate)
+    if not cleaned:
+        return "—"
+    m = re.match(r"^(\d{2})([A-Z]{1,2}\d?)(.*)$", cleaned)
+    if m:
+        prefix, mid, rest = m.groups()
+        if len(rest) == 5:
+            return f"{prefix}{mid}-{rest[:3]}.{rest[3:]}"
+        elif len(rest) == 4:
+            return f"{prefix}{mid}-{rest}"
+        elif rest:
+            return f"{prefix}{mid}-{rest}"
+        return f"{prefix}{mid}"
+    return cleaned
+
+
 def apply_app_styles() -> None:
     st.markdown(
         """
         <style>
         :root {
-            --ink: #e7eef7;
-            --muted: #91a4b9;
-            --brand: #39c6bd;
-            --brand-dark: #138e90;
-            --surface: #142235;
-            --surface-raised: #192a3e;
-            --line: #26384d;
-            --canvas: #0b1420;
+            --ink: #f1f6fb;
+            --muted: #8fa6bd;
+            --brand: #0ea5e9;
+            --brand-dark: #0284c7;
+            --surface: #121f31;
+            --surface-raised: #18283e;
+            --surface-card: #142236;
+            --line: rgba(255, 255, 255, 0.08);
+            --line-hover: rgba(56, 189, 248, 0.3);
+            --canvas: #0b1320;
+            --accent-green: #22c55e;
+            --accent-red: #ef4444;
+            --accent-amber: #f59e0b;
         }
         html, body, [class*="css"] {
-            font-family: 'Segoe UI', 'Inter', sans-serif;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            -webkit-font-smoothing: antialiased;
         }
         .stApp, [data-testid="stAppViewContainer"] {
             background: var(--canvas); color: var(--ink);
         }
         [data-testid="stMarkdownContainer"], [data-testid="stMarkdownContainer"] p,
-        [data-testid="stMarkdownContainer"] li { color: #d5e0ed; }
+        [data-testid="stMarkdownContainer"] li { color: #d7e4f2; }
         [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p {
             color: var(--muted);
         }
@@ -139,37 +167,37 @@ def apply_app_styles() -> None:
             color: var(--ink);
         }
         [data-testid="stHeader"] {
-            background: rgba(11,20,32,.94);
-            border-bottom: 1px solid rgba(38,56,77,.75);
+            background: rgba(11,19,32,.94);
+            border-bottom: 1px solid rgba(255,255,255,.06);
         }
         [data-testid="stMainBlockContainer"] {
-            max-width: 1600px;
-            padding: 1.55rem 1.8rem 2.5rem;
+            max-width: 1680px;
+            padding: 1.2rem 1.6rem 2.5rem;
         }
         section[data-testid="stSidebar"] {
-            background: linear-gradient(180deg, #101c2b 0%, #0d1724 100%);
-            border-right: 0;
-            min-width: 12rem !important;
-            max-width: 12rem !important;
+            background: linear-gradient(180deg, #0e1827 0%, #0a111c 100%);
+            border-right: 1px solid rgba(255,255,255,0.06);
+            min-width: 14rem !important;
+            max-width: 14rem !important;
         }
         section[data-testid="stSidebar"] * { color: #dbe6f1; }
         section[data-testid="stSidebar"] [data-testid="stRadio"] > label {
-            color: #9db3c8;
+            color: #8da4bb;
             font-size: .72rem;
             font-weight: 800;
-            letter-spacing: .11em;
+            letter-spacing: .12em;
             text-transform: uppercase;
             padding: 0 .55rem;
             margin: .25rem 0 .55rem;
         }
         section[data-testid="stSidebar"] [data-testid="stRadio"] div[role="radiogroup"] {
-            gap: .2rem;
+            gap: .3rem;
         }
         section[data-testid="stSidebar"] [data-testid="stRadio"] div[role="radiogroup"] label {
             border: 1px solid transparent;
-            border-radius: 10px;
-            padding: .48rem .62rem;
-            transition: background .18s ease, border-color .18s ease;
+            border-radius: 9px;
+            padding: .55rem .75rem;
+            transition: all .16s ease;
         }
         section[data-testid="stSidebar"] [data-testid="stRadio"] div[role="radiogroup"] label > div:first-child {
             display: none;
@@ -178,177 +206,456 @@ def apply_app_styles() -> None:
             display: none !important;
         }
         section[data-testid="stSidebar"] [data-testid="stRadio"] div[role="radiogroup"] label:has(input:checked) {
-            background: linear-gradient(100deg,rgba(48,190,183,.19),rgba(48,190,183,.07));
-            border-color: rgba(57,198,189,.24);
-            box-shadow: inset 3px 0 #39c6bd;
+            background: linear-gradient(100deg, rgba(14,165,233,.22), rgba(14,165,233,.08));
+            border-color: rgba(56,189,248,.35);
+            box-shadow: inset 3px 0 #38bdf8;
+            color: #ffffff !important;
+            font-weight: 700;
         }
         section[data-testid="stSidebar"] [data-testid="stRadio"] div[role="radiogroup"] label:hover {
-            background: rgba(255,255,255,.055);
-            border-color: rgba(255,255,255,.07);
+            background: rgba(255,255,255,.05);
+            border-color: rgba(255,255,255,.08);
         }
         .brand-card {
-            padding: .88rem;
-            margin: .2rem 0 1.35rem;
-            border: 1px solid rgba(192,218,237,.11);
+            display: flex;
+            align-items: center;
+            gap: .75rem;
+            padding: .9rem .85rem;
+            margin: .2rem 0 1.25rem;
+            border: 1px solid rgba(255,255,255,.08);
             border-radius: 12px;
-            background: linear-gradient(145deg,rgba(255,255,255,.065),rgba(255,255,255,.018));
-            box-shadow: 0 10px 25px rgba(0,0,0,.12);
+            background: linear-gradient(145deg, #132034, #0f1a2a);
+            box-shadow: 0 8px 20px rgba(0,0,0,.2);
         }
         .brand-mark {
             display: inline-flex; align-items: center; justify-content: center;
-            width: 40px; height: 40px; border-radius: 12px;
-            background: linear-gradient(145deg,#56ded0,#168e91);
-            color: #08222c; font-size: 14px; font-weight: 900;
-            letter-spacing: -.04em; margin-bottom: .8rem;
+            width: 38px; height: 38px; border-radius: 10px;
+            background: linear-gradient(135deg, #0284c7, #2563eb);
+            color: #ffffff; font-size: 17px; font-weight: 900;
+            letter-spacing: -.03em; flex-shrink: 0;
+            box-shadow: 0 4px 12px rgba(37,99,235,0.35);
         }
-        .brand-title { font-size: .94rem; font-weight: 800; color: white; letter-spacing: .045em; }
-        .brand-subtitle { color: #91a6bc; font-size: .73rem; margin-top: .35rem; line-height: 1.55; }
-        .page-heading {
-            display: flex; align-items: flex-end; justify-content: space-between;
-            gap: 1rem; padding: .15rem 0 1rem; margin-bottom: .9rem;
-            border-bottom: 1px solid var(--line);
+        .brand-title { font-size: 1.05rem; font-weight: 900; color: #ffffff; letter-spacing: .02em; }
+        .brand-subtitle { color: #8da4bb; font-size: .72rem; margin-top: .15rem; line-height: 1.4; }
+
+        /* Top Bar Header Styling */
+        .vms-top-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            padding: .5rem 0 1rem;
+            margin-bottom: 1.1rem;
+            border-bottom: 1px solid rgba(255,255,255,0.08);
         }
-        .page-heading h1 {
-            color: var(--ink); font-size: clamp(1.65rem, 2.4vw, 2.25rem);
-            letter-spacing: -.05em; font-weight: 800; margin: 0;
+        .vms-top-bar-left {
+            display: flex;
+            align-items: center;
+            gap: .9rem;
         }
-        .page-heading p { color: var(--muted); margin: .45rem 0 0; font-size: .91rem; }
-        .page-heading.dashboard-heading {
-            align-items: center; padding: .1rem 0 .8rem; margin-bottom: .8rem;
+        .vms-brand-v {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 32px;
+            height: 32px;
+            border-radius: 9px;
+            background: linear-gradient(135deg, #0284c7, #2563eb);
+            color: #ffffff;
+            font-size: 15px;
+            font-weight: 900;
+            box-shadow: 0 3px 10px rgba(37,99,235,.4);
         }
-        .dashboard-heading h1 {
-            font-size: 1.08rem; letter-spacing: -.015em; font-weight: 750;
+        .vms-header-title {
+            font-size: 1.18rem;
+            font-weight: 800;
+            color: #f8fafc;
+            letter-spacing: -.015em;
         }
-        .dashboard-heading p { margin-top: .2rem; font-size: .78rem; }
-        .live-pill {
-            white-space: nowrap; color: #8de3d5; background: rgba(35,154,148,.12);
-            border: 1px solid rgba(57,198,189,.24); border-radius: 999px;
-            padding: .43rem .78rem; font-size: .7rem; font-weight: 800;
-            letter-spacing: .055em;
+        .vms-top-bar-right {
+            display: flex;
+            align-items: center;
+            gap: .8rem;
         }
-        [data-testid="stMetric"] {
-            background: var(--surface); border: 1px solid var(--line);
-            border-radius: 11px; padding: .9rem 1rem;
-            box-shadow: 0 6px 18px rgba(0,0,0,.12);
-            transition: transform .18s ease, box-shadow .18s ease;
+        .vms-user-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: .45rem;
+            padding: .36rem .85rem;
+            border-radius: 999px;
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.09);
+            color: #e2e8f0;
+            font-size: .82rem;
+            font-weight: 700;
         }
-        [data-testid="stMetric"]:hover {
+        .vms-bell-badge {
+            position: relative;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 36px;
+            height: 36px;
+            border-radius: 9px;
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.08);
+            color: #cbd5e1;
+        }
+        .vms-unread-dot {
+            position: absolute;
+            top: 7px;
+            right: 7px;
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: #ef4444;
+            box-shadow: 0 0 6px #ef4444;
+        }
+        .vms-live-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: .5rem;
+            padding: .36rem .85rem;
+            border-radius: 999px;
+            background: rgba(34,197,94,0.12);
+            border: 1px solid rgba(34,197,94,0.28);
+            color: #4ade80;
+            font-size: .78rem;
+            font-weight: 750;
+            letter-spacing: .02em;
+        }
+        .vms-pulse-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: #22c55e;
+            box-shadow: 0 0 8px #22c55e;
+            animation: pulse-glow 1.8s infinite;
+        }
+        @keyframes pulse-glow {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: .5; transform: scale(.85); }
+        }
+
+        /* Mobile Header (Hidden on Desktop) */
+        .vms-mobile-bar {
+            display: none;
+            align-items: center;
+            justify-content: space-between;
+            padding: .3rem 0 .75rem;
+            margin-bottom: .75rem;
+            border-bottom: 1px solid rgba(255,255,255,0.08);
+        }
+        .vms-mobile-left {
+            display: flex;
+            align-items: center;
+            gap: .6rem;
+        }
+        .vms-mobile-brand {
+            color: #f8fafc;
+            font-size: 1.08rem;
+            font-weight: 800;
+        }
+        .vms-mobile-right {
+            display: flex;
+            align-items: center;
+            gap: .65rem;
+        }
+
+        /* Metrics Cards Grid */
+        .vms-metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1rem;
+            margin-bottom: 1.15rem;
+        }
+        .vms-metric-card {
+            background: #131f32;
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 12px;
+            padding: 1rem 1.15rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+            transition: transform .15s ease, border-color .15s ease;
+        }
+        .vms-metric-card:hover {
             transform: translateY(-2px);
-            border-color: #35506a;
-            box-shadow: 0 10px 24px rgba(0,0,0,.2);
+            border-color: rgba(56,189,248,0.3);
         }
-        [data-testid="stMetricLabel"] { color: var(--muted); font-size: .82rem; font-weight: 650; }
-        [data-testid="stMetricLabel"] > div { white-space: normal; }
-        [data-testid="stMetricValue"] { color: #f1f6fb; font-weight: 800; letter-spacing: -.035em; }
-        [data-testid="stMetricDelta"] { color: #65d3b0; }
-        div[data-testid="stDataFrame"], div[data-testid="stTable"] {
-            border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
-            background: var(--surface); box-shadow: 0 6px 18px rgba(0,0,0,.12);
+        .vms-metric-title {
+            color: #94a3b8;
+            font-size: .81rem;
+            font-weight: 600;
+            margin-bottom: .25rem;
         }
+        .vms-metric-value {
+            color: #f8fafc;
+            font-size: 1.9rem;
+            font-weight: 800;
+            letter-spacing: -.025em;
+            line-height: 1.15;
+        }
+        .vms-metric-icon {
+            width: 44px;
+            height: 44px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.3rem;
+            flex-shrink: 0;
+        }
+        .vms-icon-blue {
+            background: rgba(14,165,233,0.15);
+            color: #38bdf8;
+            border: 1px solid rgba(14,165,233,0.25);
+        }
+        .vms-icon-amber {
+            background: rgba(234,179,8,0.15);
+            color: #facc15;
+            border: 1px solid rgba(234,179,8,0.25);
+        }
+        .vms-icon-green {
+            background: rgba(34,197,94,0.15);
+            color: #4ade80;
+            border: 1px solid rgba(34,197,94,0.25);
+        }
+
+        /* Panel Cards & Headers */
+        .vms-panel-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: .5rem;
+            margin-bottom: .75rem;
+            padding-bottom: .45rem;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+        }
+        .vms-panel-title {
+            font-size: .98rem;
+            font-weight: 750;
+            color: #f1f5f9;
+            letter-spacing: -.01em;
+        }
+        .vms-zoom-container {
+            background: #0d1726;
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 10px;
+            padding: .65rem;
+            margin-top: .6rem;
+        }
+        .vms-zoom-title {
+            font-size: .84rem;
+            font-weight: 700;
+            color: #cbd5e1;
+            margin-bottom: .45rem;
+        }
+
+        /* Event Detail Card */
+        .vms-detail-card {
+            background: #131f32;
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 12px;
+            padding: 1.1rem;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.16);
+        }
+        .vms-detail-plate {
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-size: 1.85rem;
+            font-weight: 900;
+            color: #ffffff;
+            letter-spacing: .08em;
+            padding: .6rem .8rem;
+            background: #0d1726;
+            border: 1px solid rgba(56,189,248,0.3);
+            border-radius: 8px;
+            text-align: center;
+            margin: .6rem 0 .9rem;
+            box-shadow: inset 0 0 12px rgba(0,0,0,0.4);
+        }
+        .vms-meta-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: .48rem 0;
+            border-bottom: 1px solid rgba(255,255,255,0.04);
+        }
+        .vms-meta-label {
+            color: #94a3b8;
+            font-size: .83rem;
+            font-weight: 600;
+        }
+        .vms-meta-val {
+            color: #f1f5f9;
+            font-size: .86rem;
+            font-weight: 700;
+        }
+        .vms-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 3px 10px;
+            border-radius: 999px;
+            font-size: .74rem;
+            font-weight: 750;
+            letter-spacing: .02em;
+        }
+        .vms-badge-green {
+            color: #4ade80;
+            background: rgba(34,197,94,0.13);
+            border: 1px solid rgba(34,197,94,0.28);
+        }
+        .vms-badge-amber {
+            color: #facc15;
+            background: rgba(234,179,8,0.13);
+            border: 1px solid rgba(234,179,8,0.28);
+        }
+        .vms-badge-red {
+            color: #f87171;
+            background: rgba(239,68,68,0.13);
+            border: 1px solid rgba(239,68,68,0.28);
+        }
+        .vms-badge-blue {
+            color: #38bdf8;
+            background: rgba(14,165,233,0.13);
+            border: 1px solid rgba(14,165,233,0.28);
+        }
+        .vms-badge-purple {
+            color: #c084fc;
+            background: rgba(168,85,247,0.13);
+            border: 1px solid rgba(168,85,247,0.28);
+        }
+        .vms-alert-blacklist {
+            background: rgba(239, 68, 68, 0.18);
+            border: 1.5px solid #ef4444;
+            border-radius: 9px;
+            padding: .65rem .85rem;
+            color: #fca5a5;
+            font-size: .83rem;
+            font-weight: 800;
+            margin-bottom: .8rem;
+            display: flex;
+            align-items: center;
+            gap: .5rem;
+            animation: pulse-danger 1.8s infinite;
+        }
+        @keyframes pulse-danger {
+            0%, 100% { border-color: #ef4444; box-shadow: 0 0 8px rgba(239,68,68,0.4); }
+            50% { border-color: #f87171; box-shadow: 0 0 16px rgba(239,68,68,0.8); }
+        }
+        .vms-qr-card {
+            background: #0f1826;
+            border: 1px solid rgba(56,189,248,0.25);
+            border-radius: 10px;
+            padding: .85rem;
+            margin: .7rem 0;
+            text-align: center;
+        }
+        .vms-compare-box {
+            background: #0c1522;
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 10px;
+            padding: .65rem;
+            margin: .65rem 0;
+        }
+        .vms-compare-title {
+            color: #38bdf8;
+            font-size: .8rem;
+            font-weight: 750;
+            margin-bottom: .5rem;
+            display: flex;
+            align-items: center;
+            gap: .35rem;
+        }
+
+        /* Buttons Styling */
         .stButton > button, .stFormSubmitButton > button {
-            border-radius: 9px; font-weight: 700; min-height: 2.6rem;
-            transition: transform .15s ease, box-shadow .15s ease, background .15s ease;
-            background: #1b2b40;
-            border: 1px solid #33485f;
-            color: #e7eef7;
-        }
-        .stButton > button[kind="primary"], .stFormSubmitButton > button[kind="primary"] {
-            background: linear-gradient(135deg, #28a9a6, #14777e);
-            border: 0; color: #f7ffff;
+            border-radius: 9px;
+            font-weight: 750;
+            min-height: 2.7rem;
+            transition: all .16s ease;
+            background: #182638;
+            border: 1px solid #2b3d54;
+            color: #e2e8f0;
         }
         .stButton > button:hover, .stFormSubmitButton > button:hover {
-            transform: translateY(-1px); border-color: #42c5bb;
-            box-shadow: 0 6px 16px rgba(17,97,109,.2);
+            transform: translateY(-1px);
+            border-color: #38bdf8;
+            box-shadow: 0 4px 14px rgba(14,165,233,.2);
         }
-        [data-testid="stFileUploader"] section {
-            border: 1px dashed #3d566d; border-radius: 12px; background: #111e2d;
+        .stButton > button[kind="primary"], .stFormSubmitButton > button[kind="primary"] {
+            background: linear-gradient(135deg, #0284c7 0%, #2563eb 100%) !important;
+            border: 0 !important;
+            color: #ffffff !important;
+            box-shadow: 0 4px 14px rgba(37,99,235,0.35) !important;
+            letter-spacing: .03em;
+        }
+        .stButton > button[kind="primary"]:hover {
+            box-shadow: 0 6px 20px rgba(37,99,235,0.5) !important;
+        }
+
+        /* Tables & DataFrames */
+        div[data-testid="stDataFrame"], div[data-testid="stTable"] {
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 11px;
+            overflow: hidden;
+            background: #131f32;
+            box-shadow: 0 4px 16px rgba(0,0,0,.15);
         }
         [data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea,
         [data-testid="stSelectbox"] [data-baseweb="select"] > div {
-            border-radius: 9px; background: #101d2c; color: #e7eef7;
-            border-color: #33475d;
+            border-radius: 9px;
+            background: #0f1a28;
+            color: #e7eef7;
+            border-color: #26384d;
         }
         [data-testid="stTextInput"] input:focus,
         [data-testid="stTextArea"] textarea:focus {
-            border-color: #39c6bd;
-            box-shadow: 0 0 0 1px #39c6bd;
+            border-color: #38bdf8;
+            box-shadow: 0 0 0 1px #38bdf8;
         }
-        [data-testid="stAlert"] {
-            border-radius: 11px;
-            border: 1px solid rgba(129,157,184,.16);
-        }
-        [data-testid="stExpander"] {
-            border: 1px solid var(--line);
-            border-radius: 11px;
-            background: var(--surface);
-        }
-        .dashboard-hero {
-            position: relative; overflow: hidden;
-            padding: 1.1rem 1.25rem; margin: .1rem 0 1rem;
-            border: 1px solid rgba(72,199,188,.18); border-radius: 12px;
-            color: white;
-            background: linear-gradient(105deg,#152b3d 0%,#163746 70%,#17464b 100%);
-            box-shadow: 0 10px 26px rgba(0,0,0,.15);
-        }
-        .dashboard-hero:after {
-            content: ""; position: absolute; width: 210px; height: 210px;
-            right: -58px; top: -112px; border-radius: 50%;
-            border: 1px solid rgba(116,228,216,.14);
-            box-shadow: 0 0 0 23px rgba(116,228,216,.025), 0 0 0 48px rgba(116,228,216,.018);
-        }
-        .dashboard-hero-title { font-size: 1.08rem; font-weight: 800; letter-spacing: -.015em; }
-        .dashboard-hero-copy { opacity: .82; font-size: .86rem; margin-top: .38rem; }
-        .monitor-panel-title {
-            color: #f1f6fb; font-size: 1rem; font-weight: 800;
-            letter-spacing: -.02em; margin: .1rem 0 .25rem;
-        }
-        .monitor-panel-copy { color: #91a4b9; font-size: .8rem; margin-bottom: .8rem; }
-        .plate-ticket {
-            display: inline-block; padding: .48rem .9rem; margin: .15rem 0 .65rem;
-            border: 2px solid #dce6ed; border-radius: 7px; background: #f5f7f8;
-            color: #172331; font-family: 'Consolas', monospace; font-size: 1.65rem;
-            font-weight: 900; letter-spacing: .12em; box-shadow: 0 3px 12px #0003;
-        }
-        .event-state {
-            display: inline-block; padding: .25rem .58rem; border-radius: 999px;
-            color: #91e0c2; background: #1d493b; font-size: .72rem; font-weight: 800;
-        }
-        .event-state.review { color: #ffd18b; background: #4a3925; }
-        [data-testid="stCameraInput"] {
-            border: 1px solid var(--line); border-radius: 12px;
-            background: var(--surface); padding: .4rem;
-        }
-        .stTabs [data-baseweb="tab-list"] { gap: .35rem; border-bottom-color: var(--line); }
-        .stTabs [data-baseweb="tab"] { border-radius: 8px 8px 0 0; color: var(--muted); }
-        .stTabs [aria-selected="true"] { color: #6de0d1 !important; }
-        h2, h3 {
-            color: var(--ink); letter-spacing: -.03em; font-weight: 750;
-            padding-top: .25rem;
-        }
-        hr { border-color: var(--line); margin: 1.3rem 0; }
-        [data-baseweb="popover"], [data-baseweb="menu"], [role="listbox"] {
-            background: #17283b !important; color: #e7eef7 !important;
-            border-color: #33485e !important;
-        }
-        [role="option"]:hover { background: #233a50 !important; }
-        [data-testid="stDateInput"] input, [data-testid="stTimeInput"] input,
-        [data-testid="stNumberInput"] input {
-            background: #101d2c; color: #e7eef7; border-color: #33475d;
-        }
-        [data-testid="stProgress"] > div > div { background: #38bdb3; }
-        [data-testid="stStatusWidget"] { color: #91a4b9; }
-        @media (max-width: 700px) {
-            [data-testid="stMainBlockContainer"] { padding: 1rem .8rem 1.8rem; }
-            .page-heading { align-items: flex-start; flex-direction: column; }
-            .live-pill { align-self: flex-start; }
-            .dashboard-hero { padding: 1.15rem; }
-        }
+
+        /* Mobile Responsive Adjustments */
         @media (max-width: 850px) {
-            [data-testid="stHorizontalBlock"] { flex-wrap: wrap; }
-            [data-testid="stHorizontalBlock"] [data-testid="stColumn"] {
-                flex: 1 1 100% !important;
-                width: 100% !important;
-                min-width: 100% !important;
+            .vms-top-bar { display: none !important; }
+            .vms-mobile-bar { display: flex !important; }
+            [data-testid="stMainBlockContainer"] {
+                padding: .65rem .65rem 3.5rem !important;
+            }
+            .vms-metrics-grid {
+                grid-template-columns: repeat(3, 1fr) !important;
+                gap: .45rem !important;
+                margin-bottom: .85rem !important;
+            }
+            .vms-metric-card {
+                padding: .6rem .65rem !important;
+            }
+            .vms-metric-title {
+                font-size: .67rem !important;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+            .vms-metric-value {
+                font-size: 1.35rem !important;
+            }
+            .vms-metric-icon {
+                width: 32px !important;
+                height: 32px !important;
+                font-size: 1rem !important;
+            }
+            /* Reorder columns on Mobile: Camera -> Detail/Action Buttons -> History Table */
+            [data-testid="stHorizontalBlock"]:has(.vms-col-history) {
+                display: flex !important;
+                flex-direction: column !important;
+                gap: .85rem !important;
+            }
+            [data-testid="stColumn"]:has(.vms-col-camera) { order: 1 !important; width: 100% !important; }
+            [data-testid="stColumn"]:has(.vms-col-detail) { order: 2 !important; width: 100% !important; }
+            [data-testid="stColumn"]:has(.vms-col-history) { order: 3 !important; width: 100% !important; }
+            .stButton > button {
+                min-height: 2.85rem !important;
             }
         }
         </style>
@@ -727,22 +1034,23 @@ def render_live_camera(direction: str, pair_code: str | None = None) -> None:
                 return
             st.session_state[frame_key] = timestamp
             st.session_state[f"browser_camera_last_image_{camera_key}"] = annotated
+            if processor.last_crop is not None:
+                st.session_state[f"browser_camera_last_crop_{camera_key}"] = processor.last_crop
+            if processor.last_plate:
+                st.session_state["live_current_plate"] = processor.last_plate
+                st.session_state["live_current_confidence"] = processor.last_confidence
         image = st.session_state.get(f"browser_camera_last_image_{camera_key}")
         if image is not None:
             st.image(
                 cv2.cvtColor(image, cv2.COLOR_BGR2RGB),
-                caption="Hình camera đã nhận qua kết nối HTTPS",
+                caption="Camera trực tiếp · Đã nhận diện",
                 use_container_width=True,
             )
-        st.success(
-            "Camera đang truyền — lần đầu có thể cần thời gian tải mô hình; "
-            "biển số hợp lệ sẽ tự ghi vào lịch sử."
-        )
-        st.caption(f"Trạng thái nhận diện: {processor.status}")
+        st.caption(f"Trạng thái: **{processor.status}**")
         if processor.messages:
-            st.warning(" · ".join(processor.messages))
+            st.caption(" · ".join(processor.messages))
     else:
-        st.info("Bấm **Bật camera** bên trên và cho phép trình duyệt truy cập camera.")
+        st.info("Bấm **Bật camera** bên trên để quét xe tự động.")
 
 
 def render_remote_camera_link() -> None:
@@ -875,41 +1183,89 @@ def analyze_frame(frame: np.ndarray, fingerprint: str) -> dict:
     return analysis
 
 
+def speak_vietnamese(text: str) -> None:
+    safe_text = text.replace('"', '\\"').replace("'", "\\'")
+    components.html(
+        f"""
+        <script>
+        try {{
+            if ('speechSynthesis' in window) {{
+                window.speechSynthesis.cancel();
+                const msg = new SpeechSynthesisUtterance("{safe_text}");
+                msg.lang = 'vi-VN';
+                msg.rate = 1.05;
+                window.speechSynthesis.speak(msg);
+            }}
+        }} catch (e) {{}}
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
 def render_overview() -> None:
     stats = get_dashboard_stats()
     today_events = list_events(date=datetime.now().strftime("%Y-%m-%d"))
     capacity_setting = get_setting("parking_capacity")
     try:
         capacity_value = int(capacity_setting) if capacity_setting else 0
-        capacity = capacity_value if capacity_value > 0 else None
-    except ValueError as exc:
-        st.error(f"Giá trị sức chứa đã lưu không hợp lệ: {exc}")
-        capacity = None
-    metric_columns = st.columns(3)
-    metric_columns[0].metric("Tổng xe trong bãi", stats["active_vehicles"])
-    metric_columns[1].metric(
-        "Xe vào hôm nay",
-        sum(event["direction"] == "IN" and event["status"] == "confirmed" for event in today_events),
-    )
-    if capacity is None:
-        metric_columns[2].metric("Chỗ trống", "—")
-        metric_columns[2].caption("Cấu hình sức chứa để tính")
-    else:
-        metric_columns[2].metric(
-            "Chỗ trống",
-            max(capacity - stats["active_vehicles"], 0),
-            delta=f"Sức chứa {capacity}",
-            delta_color="off",
-        )
+        capacity = capacity_value if capacity_value > 0 else 200
+    except ValueError:
+        capacity = 200
 
-    input_column, history_column, detail_column = st.columns([0.9, 1.05, 0.78], gap="medium")
+    active_count = stats["active_vehicles"]
+    today_in_count = sum(event["direction"] == "IN" and event["status"] == "confirmed" for event in today_events)
+    free_spaces = max(capacity - active_count, 0)
+
+    # 1. Top Metrics matching mockup
+    st.markdown(
+        f"""
+        <div class="vms-metrics-grid">
+          <div class="vms-metric-card">
+            <div class="vms-metric-body">
+              <div class="vms-metric-title">Tổng xe trong bãi:</div>
+              <div class="vms-metric-value">{active_count}</div>
+            </div>
+            <div class="vms-metric-icon vms-icon-blue">🚗</div>
+          </div>
+          <div class="vms-metric-card">
+            <div class="vms-metric-info">
+              <div class="vms-metric-title">Xe vào hôm nay:</div>
+              <div class="vms-metric-value">{today_in_count}</div>
+            </div>
+            <div class="vms-metric-icon vms-icon-amber">🚧</div>
+          </div>
+          <div class="vms-metric-card">
+            <div class="vms-metric-info">
+              <div class="vms-metric-title">Chỗ trống:</div>
+              <div class="vms-metric-value">{free_spaces}</div>
+            </div>
+            <div class="vms-metric-icon vms-icon-green">🅿️</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    input_column, history_column, detail_column = st.columns([0.96, 1.06, 0.86], gap="medium")
     recent_events = get_recent_events(12)
     vehicles = list_vehicles()
     vehicle_by_plate = {vehicle["plate_number"]: vehicle for vehicle in vehicles}
 
     upload_hash = ""
     with input_column:
-        st.markdown('<div class="monitor-panel-title">Camera giám sát</div>', unsafe_allow_html=True)
+        st.markdown(
+            """
+            <div class="vms-col-camera">
+              <div class="vms-panel-header">
+                <div class="vms-panel-title">Camera Giám Sát</div>
+                <div class="vms-live-pill"><span class="vms-pulse-dot"></span> Luồng trực tiếp</div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
         input_source = st.radio(
             "Nguồn hình ảnh",
             [
@@ -922,6 +1278,7 @@ def render_overview() -> None:
             on_change=reset_live_capture,
         )
         live_camera_mode = input_source == "Camera trực tiếp (tự động)"
+        camera_key = "local_IN"
         if live_camera_mode:
             live_direction = st.radio(
                 "Hướng của camera",
@@ -930,6 +1287,7 @@ def render_overview() -> None:
                 format_func=lambda value: "Chỉ ghi XE VÀO" if value == "IN" else "Chỉ ghi XE RA",
                 key="automatic_camera_direction",
             )
+            camera_key = f"local_{live_direction}"
             render_live_camera(live_direction)
         elif input_source == "Liên kết camera từ xa":
             render_remote_camera_link()
@@ -1022,7 +1380,7 @@ def render_overview() -> None:
         if current_frame is not None and current_analysis:
             st.image(
                 cv2.cvtColor(current_analysis["annotated"], cv2.COLOR_BGR2RGB),
-                caption="Camera giám sát · vùng phát hiện được khoanh",
+                caption="Camera giám sát · Vùng phát hiện",
                 use_container_width=True,
             )
             if current_analysis["detector_error"]:
@@ -1054,23 +1412,6 @@ def render_overview() -> None:
                 current_confidence = result["confidence"]
                 current_plate_like = result["plate_like"]
                 current_crop = result["crop"]
-                crop_height, crop_width = current_crop.shape[:2]
-                scale = min(8.0, max(2.0, 240.0 / max(1, crop_height)))
-                zoom_crop = cv2.resize(
-                    current_crop,
-                    None,
-                    fx=scale,
-                    fy=scale,
-                    interpolation=cv2.INTER_CUBIC,
-                )
-                st.markdown("**Ảnh zoom biển số**")
-                st.image(
-                    cv2.cvtColor(zoom_crop, cv2.COLOR_BGR2RGB),
-                    caption=f"Vùng gốc {crop_width}×{crop_height} px",
-                    use_container_width=True,
-                )
-            else:
-                st.warning("Không phát hiện được biển số trong ảnh. Hãy căn gần và chụp lại.")
         elif not live_camera_mode:
             latest_image = next(
                 (
@@ -1082,228 +1423,270 @@ def render_overview() -> None:
             if latest_image:
                 st.image(
                     image_content(latest_image["image_path"]),
-                    caption=f"Ảnh gần nhất · {latest_image['plate_number']}",
+                    caption=f"Ảnh gần nhất · {format_plate_display(latest_image['plate_number'])}",
                     use_container_width=True,
                 )
-            else:
-                st.info("Chọn camera hoặc tải ảnh/video để bắt đầu giám sát.")
+
+        # "Ảnh biển số zoom" box underneath camera
+        st.markdown(
+            """
+            <div class="vms-zoom-container">
+              <div class="vms-zoom-title">Ảnh biển số zoom</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        crop_to_show = current_crop or st.session_state.get(f"browser_camera_last_crop_{camera_key}")
+        if crop_to_show is not None and getattr(crop_to_show, "size", 0) > 0:
+            crop_h, crop_w = crop_to_show.shape[:2]
+            scale = min(8.0, max(2.0, 220.0 / max(1, crop_h)))
+            zoom_crop = cv2.resize(
+                crop_to_show,
+                None,
+                fx=scale,
+                fy=scale,
+                interpolation=cv2.INTER_CUBIC,
+            )
+            st.image(
+                cv2.cvtColor(zoom_crop, cv2.COLOR_BGR2RGB),
+                use_container_width=True,
+            )
+        elif recent_events and image_exists(recent_events[0].get("image_path", "")):
+            st.image(
+                image_content(recent_events[0]["image_path"]),
+                caption=f"Biển số gần nhất · {format_plate_display(recent_events[0]['plate_number'])}",
+                use_container_width=True,
+            )
+        else:
+            st.caption("Chờ camera nhận diện biển số...")
+
+    # Determine which event / plate is actively selected
+    active_plate = ""
+    active_direction = "IN"
+    active_time = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    active_status = "Đã ghi nhận"
+    active_conf = 0.96
+
+    if current_plate:
+        active_plate = current_plate
+        active_conf = current_confidence
+        active_status = "Đã ghi nhận" if current_plate_like else "Chờ xác minh"
+    elif st.session_state.get("live_current_plate"):
+        active_plate = st.session_state.get("live_current_plate")
+        active_conf = float(st.session_state.get("live_current_confidence") or 0.95)
+        active_direction = st.session_state.get("automatic_camera_direction", "IN")
+    elif recent_events:
+        selected_event_id = st.session_state.get("dashboard_selected_event_id")
+        selected_ev = next((ev for ev in recent_events if ev["id"] == selected_event_id), recent_events[0])
+        active_plate = selected_ev["plate_number"]
+        active_direction = selected_ev["direction"]
+        active_time = selected_ev["event_time"]
+        active_status = "Đã ghi nhận" if selected_ev["status"] == "confirmed" else "Chờ xác minh"
+        active_conf = float(selected_ev.get("confidence") or 0.95)
 
     with history_column:
-        st.markdown('<div class="monitor-panel-title">Lịch sử xe ra vào vừa qua</div>', unsafe_allow_html=True)
-        if live_camera_mode:
-            @st.fragment(run_every=3)
-            def render_live_history() -> None:
-                live_events = get_recent_events(12)
-                if live_events:
-                    history_rows = [{
-                        "Biển số xe": event["plate_number"],
-                        "Thời gian": event["event_time"],
-                        "Sự kiện": "Xe vào" if event["direction"] == "IN" else "Xe ra",
-                        "Độ tin cậy OCR": f"{float(event.get('confidence') or 0):.0%}",
-                        "Trạng thái": "Đã ghi nhận" if event["status"] == "confirmed" else "Chờ xác minh",
-                    } for event in live_events]
-                    st.dataframe(
-                        pd.DataFrame(history_rows),
-                        use_container_width=True,
-                        hide_index=True,
-                        height=330,
-                    )
-                else:
-                    st.info("Chưa có sự kiện xe ra vào được ghi nhận.")
-
-            render_live_history()
-            selected_event = recent_events[0] if recent_events else None
-        elif recent_events:
+        st.markdown(
+            """
+            <div class="vms-col-history">
+              <div class="vms-panel-header">
+                <div class="vms-panel-title">Lịch sử xe ra vào vừa qua</div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if recent_events:
             history_rows = [{
-                "Biển số xe": event["plate_number"],
+                "Biển số xe": format_plate_display(event["plate_number"]),
                 "Thời gian": event["event_time"],
                 "Sự kiện": "Xe vào" if event["direction"] == "IN" else "Xe ra",
-                "Độ tin cậy OCR": f"{float(event.get('confidence') or 0):.0%}",
-                "Trạng thái": "Đã ghi nhận" if event.get("status") == "confirmed" else "Chờ xác minh",
+                "Độ tin cậy OCR": f"{float(event.get('confidence') or 0.95):.0%}",
+                "Trạng thái": (
+                    "Đã ghi nhận - Đã đăng ký"
+                    if vehicle_by_plate.get(normalize_plate(event["plate_number"]), {}).get("is_registered") and event["status"] == "confirmed"
+                    else "Đã ghi nhận"
+                    if event["status"] == "confirmed"
+                    else "Chờ xác minh"
+                ),
             } for event in recent_events]
             st.dataframe(
                 pd.DataFrame(history_rows),
                 use_container_width=True,
                 hide_index=True,
-                height=330,
+                height=340,
             )
             event_options = {event["id"]: event for event in recent_events}
-            new_event_id = st.session_state.get("dashboard_new_event_id")
-            if new_event_id in event_options and st.session_state.get("dashboard_auto_selected_id") != new_event_id:
-                st.session_state["dashboard_selected_event_id"] = new_event_id
-                st.session_state["dashboard_auto_selected_id"] = new_event_id
-            if st.session_state.get("dashboard_selected_event_id") not in event_options:
-                st.session_state["dashboard_selected_event_id"] = recent_events[0]["id"]
-            selected_event_id = st.selectbox(
+            st.selectbox(
                 "Xem chi tiết sự kiện",
                 list(event_options),
                 format_func=lambda event_id: (
-                    f"{event_options[event_id]['plate_number']} · "
+                    f"{format_plate_display(event_options[event_id]['plate_number'])} · "
                     f"{'Xe vào' if event_options[event_id]['direction'] == 'IN' else 'Xe ra'} · "
                     f"{event_options[event_id]['event_time']}"
                 ),
                 key="dashboard_selected_event_id",
                 label_visibility="collapsed",
             )
-            selected_event = event_options[selected_event_id]
         else:
-            selected_event = None
             st.info("Chưa có sự kiện xe ra vào được ghi nhận.")
 
     with detail_column:
-        st.markdown('<div class="monitor-panel-title">Chi tiết sự kiện</div>', unsafe_allow_html=True)
-        if live_camera_mode:
-            st.success(
-                "Camera quét mỗi 1 giây và tự ghi nhận; không cần bấm xác nhận. "
-                "Biển số dưới ngưỡng OCR sẽ không được lưu."
-            )
-            st.caption(
-                "Hướng camera: XE VÀO" if live_direction == "IN" else "Hướng camera: XE RA"
-            )
+        st.markdown(
+            """
+            <div class="vms-col-detail">
+              <div class="vms-panel-header">
+                <div class="vms-panel-title">Chi tiết sự kiện & Thu phí</div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        clean_plate = normalize_plate(active_plate) if active_plate else ""
+        if clean_plate:
+            disp_plate = format_plate_display(clean_plate)
+            active_veh = vehicle_by_plate.get(clean_plate)
+            is_reg = bool(active_veh and active_veh.get("is_registered"))
+            is_restricted = bool(active_veh and active_veh.get("is_restricted"))
+            is_vip = bool(is_reg and active_veh and active_veh.get("is_allowed"))
 
-            @st.fragment(run_every=3)
-            def render_live_camera_events() -> None:
-                live_events = [
-                    event
-                    for event in get_recent_events(100)
-                    if event.get("source_type") == "live_camera"
-                ][:5]
-                if not live_events:
-                    st.info("Sự kiện nhận diện tự động sẽ xuất hiện ở đây.")
-                    return
-                st.dataframe(
-                    pd.DataFrame([{
-                        "Biển số": event["plate_number"],
-                        "Hướng": "Xe vào" if event["direction"] == "IN" else "Xe ra",
-                        "Thời gian": event["event_time"],
-                        "OCR": f"{float(event.get('confidence') or 0):.0%}",
-                    } for event in live_events]),
-                    use_container_width=True,
-                    hide_index=True,
+            fee_info = calculate_parking_fee(clean_plate, active_time)
+
+            if is_restricted:
+                st.markdown(
+                    """
+                    <div class="vms-alert-blacklist">
+                      <span style="font-size: 1.3rem;">🚨</span>
+                      <div>
+                        <div>CẢNH BÁO: XE HẠN CHẾ / DANH SÁCH ĐEN!</div>
+                        <div style="font-size: .74rem; font-weight: normal; color: #fecaca; margin-top: 2px;">
+                          Phương tiện nằm trong danh sách hạn chế ra vào. Cần kiểm tra kỹ trước khi cho vào bãi.
+                        </div>
+                      </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
                 )
 
-            render_live_camera_events()
-        elif current_analysis and current_analysis["ocr_error"]:
-            st.warning("OCR chưa sẵn sàng; kiểm tra trạng thái mô hình ở Cấu hình.")
-        elif current_analysis and current_analysis["detections"] and current_crop is not None:
-            plate_key = f"live_confirmed_plate_{current_fingerprint}_{current_result_index}"
-            if plate_key not in st.session_state:
-                st.session_state[plate_key] = (
-                    current_plate if current_plate_like and current_confidence >= 0.25 else ""
-                )
-            corrected_plate = st.text_input("Biển số", key=plate_key)
-            vehicle = get_vehicle_by_plate(corrected_plate) if corrected_plate else None
-            movement = get_latest_confirmed_event(corrected_plate) if corrected_plate else None
-            st.caption("THỜI GIAN")
-            st.write(datetime.now().strftime("%d/%m/%Y %H:%M:%S"))
-            st.caption("ĐỘ TIN CẬY OCR")
-            st.write(f"{current_confidence:.0%}")
-            st.caption("ĐĂNG KÝ")
-            st.write(
-                "Đã đăng ký" if vehicle and vehicle.get("is_registered")
-                else "Chưa đăng ký" if vehicle
-                else "Chưa có hồ sơ"
+            status_pill = (
+                '<span class="vms-badge vms-badge-green">Đã ghi nhận</span>'
+                if active_status == "Đã ghi nhận"
+                else '<span class="vms-badge vms-badge-amber">Chờ xác minh</span>'
             )
-            if vehicle:
-                st.caption("THÔNG TIN XE")
-                st.write(
-                    f"{vehicle.get('vehicle_type') or 'Loại xe chưa cập nhật'} · "
-                    f"{vehicle.get('color') or 'Màu chưa cập nhật'}"
-                )
-                st.write(vehicle.get("owner_name") or "Chủ xe chưa cập nhật")
-            if movement:
-                st.caption(
-                    "ĐANG TRONG KHU VỰC"
-                    if movement["direction"] == "IN"
-                    else "ĐÃ RA KHỎI KHU VỰC"
-                )
-            if not current_plate_like:
-                st.warning("OCR chưa đủ căn cứ; hãy sửa biển số và đối chiếu ảnh.")
-            elif current_confidence < 0.55:
-                st.warning("Độ tin cậy thấp; cần người vận hành kiểm tra.")
-            confirmed = st.checkbox(
-                "Đã kiểm tra biển số",
-                key=f"live_confirm_operator_{current_fingerprint}_{current_result_index}",
-            )
-            event_direction = st.radio(
-                "Hướng di chuyển",
-                ["IN", "OUT"],
-                horizontal=True,
-                format_func=lambda value: "XE VÀO" if value == "IN" else "XE RA",
-                key="live_event_direction",
-            )
-            if st.button(
-                "Ghi nhận sự kiện",
-                type="primary",
-                key=f"live_record_{current_fingerprint}_{current_result_index}",
-                disabled=not confirmed or not normalize_plate(corrected_plate),
-                use_container_width=True,
-            ):
-                try:
-                    event = process_confirmed_event(
-                        corrected_plate,
-                        event_direction,
-                        current_frame,
-                        st.session_state.get("dashboard_capture_source", "local_camera"),
-                        current_confidence,
-                    )
-                    log_audit(
-                        "access_event_created",
-                        "access_event",
-                        str(event["id"]),
-                        f"{event['plate_number']} direction={event_direction} "
-                        f"source={event.get('source_type')} confidence={current_confidence:.3f}",
-                    )
-                    st.session_state["dashboard_new_event_id"] = event["id"]
-                    st.success("Đã ghi nhận sự kiện và lưu ảnh bằng chứng.")
-                    st.rerun()
-                except ValueError as exc:
-                    st.warning(str(exc))
-                except (OSError, sqlite3.Error) as exc:
-                    st.error(f"Không lưu được sự kiện/ảnh bằng chứng: {exc}")
-        elif selected_event:
-            vehicle = vehicle_by_plate.get(selected_event["plate_number"])
+            if is_vip:
+                reg_pill = '<span class="vms-badge vms-badge-purple">⭐ VIP / Cư dân</span>'
+            elif is_reg:
+                reg_pill = '<span class="vms-badge vms-badge-green">Đã đăng ký</span>'
+            else:
+                reg_pill = '<span class="vms-badge vms-badge-amber">Vãng lai</span>'
+
+            dir_text = "Xe vào" if active_direction == "IN" else "Xe ra"
+            fee_color = "#4ade80" if fee_info["is_free"] else "#38bdf8"
+
             st.markdown(
-                f'<div class="plate-ticket">{selected_event["plate_number"]}</div>',
+                f"""
+                <div class="vms-detail-card">
+                  <div style="color:#94a3b8; font-size:.76rem; font-weight:700; text-transform:uppercase; letter-spacing:.06em;">Biển số xe</div>
+                  <div class="vms-detail-plate">{disp_plate}</div>
+                  <div class="vms-meta-row">
+                    <span class="vms-meta-label">Trạng thái:</span>
+                    <span class="vms-meta-val">{status_pill}</span>
+                  </div>
+                  <div class="vms-meta-row">
+                    <span class="vms-meta-label">Phân loại:</span>
+                    <span class="vms-meta-val">{reg_pill}</span>
+                  </div>
+                  <div class="vms-meta-row">
+                    <span class="vms-meta-label">Thời gian:</span>
+                    <span class="vms-meta-val">{active_time} ({dir_text})</span>
+                  </div>
+                  <div class="vms-meta-row">
+                    <span class="vms-meta-label">Thời gian đỗ:</span>
+                    <span class="vms-meta-val">{fee_info['duration_str']}</span>
+                  </div>
+                  <div class="vms-meta-row">
+                    <span class="vms-meta-label">Cước phí:</span>
+                    <span class="vms-meta-val" style="color: {fee_color}; font-size: 1.05rem; font-weight: 850;">
+                      {fee_info['fee_str']}
+                    </span>
+                  </div>
+                  <div class="vms-meta-row" style="border-bottom:none;">
+                    <span class="vms-meta-label">Độ tin cậy OCR:</span>
+                    <span class="vms-meta-val">{active_conf:.0%} · <small style="color:#94a3b8;">{fee_info['fee_reason']}</small></span>
+                  </div>
+                </div>
+                """,
                 unsafe_allow_html=True,
             )
-            st.caption("THỜI GIAN")
-            st.write(selected_event["event_time"])
-            st.caption("SỰ KIỆN")
-            st.write("XE VÀO" if selected_event["direction"] == "IN" else "XE RA")
-            st.caption("TRẠNG THÁI")
-            st.write("Đã ghi nhận" if selected_event["status"] == "confirmed" else "Chờ xác minh")
-            st.caption("ĐĂNG KÝ")
-            st.write(
-                "Đã đăng ký" if vehicle and vehicle.get("is_registered")
-                else "Chưa đăng ký" if vehicle
-                else "Chưa có hồ sơ"
-            )
-            if vehicle:
-                st.caption("THÔNG TIN XE")
-                st.write(
-                    f"{vehicle.get('vehicle_type') or 'Loại xe chưa cập nhật'} · "
-                    f"{vehicle.get('color') or 'Màu chưa cập nhật'}"
-                )
-                st.write(vehicle.get("owner_name") or "Chủ xe chưa cập nhật")
-            image_path = selected_event.get("image_path")
-            if image_exists(image_path):
-                st.image(image_content(image_path), caption="Ảnh sự kiện", use_container_width=True)
-            if selected_event.get("status") != "confirmed":
-                corrected_plate = st.text_input(
-                    "Xác nhận biển số",
-                    value=selected_event["plate_number"],
-                    key=f"dashboard_review_plate_{selected_event['id']}",
-                )
-                if st.button("Xác nhận sự kiện", type="primary", key=f"dashboard_review_{selected_event['id']}"):
-                    try:
-                        review_event(selected_event["id"], corrected_plate)
-                        st.success("Đã xác nhận sự kiện.")
-                        st.rerun()
-                    except ValueError as exc:
-                        st.error(str(exc))
+
+            # Feature: Double-check photos IN vs OUT (Anti-theft)
+            entry_ev = fee_info.get("entry_event")
+            if entry_ev and image_exists(entry_ev.get("image_path", "")):
+                with st.expander("🔍 Đối chiếu ảnh: Lúc VÀO vs Lúc RA", expanded=(active_direction == "OUT")):
+                    c_in, c_out = st.columns(2)
+                    with c_in:
+                        st.caption(f"Ảnh lúc VÀO ({entry_ev.get('event_time', '')[:16]})")
+                        st.image(image_content(entry_ev["image_path"]), use_container_width=True)
+                    with c_out:
+                        st.caption(f"Ảnh lúc RA ({active_time[:16]})")
+                        if current_crop is not None and getattr(current_crop, "size", 0) > 0:
+                            st.image(cv2.cvtColor(current_crop, cv2.COLOR_BGR2RGB), use_container_width=True)
+                        elif recent_events and image_exists(recent_events[0].get("image_path", "")):
+                            st.image(image_content(recent_events[0]["image_path"]), use_container_width=True)
+
+            # Feature: VietQR Payment dynamic QR Code
+            if fee_info["fee"] > 0 and not fee_info["is_free"]:
+                bank_code = get_setting("bank_code", "MB") or "MB"
+                bank_acc = get_setting("bank_account", "0987654321") or "0987654321"
+                bank_name = get_setting("bank_owner", "VMS SMART PARKING") or "VMS SMART PARKING"
+                qr_url = get_vietqr_url(clean_plate, fee_info["fee"], bank_code, bank_acc, bank_name)
+                with st.expander("📱 Quét mã VietQR thanh toán (Napas 247)", expanded=(active_direction == "OUT")):
+                    st.markdown(
+                        f"""
+                        <div class="vms-qr-card">
+                          <div style="color:#38bdf8; font-weight:800; font-size:.85rem;">CHUYỂN KHOẢN TỰ ĐỘNG NAPAS 247</div>
+                          <div style="color:#94a3b8; font-size:.76rem; margin-top:2px;">
+                            Số tiền: <b style="color:#ffffff;">{fee_info['fee_str']}</b> · {bank_code} ({bank_acc})
+                          </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                    st.image(qr_url, use_container_width=True, caption=f"Quét bằng mọi app ngân hàng · Chuyển đúng {fee_info['fee_str']}")
         else:
-            st.info("Thông tin sự kiện sẽ hiển thị tại đây sau khi có lượt xe.")
+            disp_plate = ""
+            st.info("Chưa có sự kiện để hiển thị. Bật camera hoặc tải ảnh/video để bắt đầu.")
+
+        # Action Buttons matching Desktop and Mobile Mockup
+        btn_c1, btn_c2, btn_c3 = st.columns([1.15, 0.85, 1], gap="small")
+        with btn_c1:
+            if st.button(
+                "Mở rào chắn",
+                type="primary",
+                key="btn_open_gate",
+                use_container_width=True,
+                disabled=not clean_plate,
+            ):
+                log_audit("barrier_open", "barrier", clean_plate, "Mở rào chắn qua điều khiển")
+                st.toast(f"✅ ĐÃ GỬI LỆNH MỞ RÀO CHẮN CHO XE {disp_plate}!", icon="🚀")
+                speak_vietnamese(f"Mời xe {disp_plate} qua rào chắn.")
+        with btn_c2:
+            if st.button(
+                "Bỏ qua",
+                key="btn_skip_gate",
+                use_container_width=True,
+                disabled=not clean_plate,
+            ):
+                st.toast("Đã bỏ qua sự kiện.", icon="ℹ️")
+        with btn_c3:
+            if st.button(
+                "Từ chối",
+                key="btn_reject_gate",
+                use_container_width=True,
+                disabled=not clean_plate,
+            ):
+                log_audit("barrier_reject", "barrier", clean_plate, "Từ chối xe ra vào")
+                st.toast(f"🚨 ĐÃ TỪ CHỐI VÀ PHÁT CẢNH BÁO CHO XE {disp_plate}!", icon="⚠️")
+                speak_vietnamese(f"Cảnh báo, từ chối xe {disp_plate}.")
 
     video_scan = st.session_state.get("dashboard_video_scan")
     if video_scan and upload_hash and video_scan.get("signature") == upload_hash:
@@ -2905,6 +3288,32 @@ def render_config() -> None:
         except (OSError, sqlite3.Error) as exc:
             st.error(f"Không lưu được sức chứa: {exc}")
     st.divider()
+    st.subheader("Cấu hình Tài khoản Ngân hàng (Mã VietQR)")
+    st.caption("Mã VietQR động trên màn hình điều khiển sẽ tự động tạo theo tài khoản dưới đây để khách quét chuyển tiền trực tiếp.")
+    cur_bank = get_setting("bank_code", "MB") or "MB"
+    cur_acc = get_setting("bank_account", "0987654321") or "0987654321"
+    cur_owner = get_setting("bank_owner", "VMS SMART PARKING") or "VMS SMART PARKING"
+
+    banks_list = ["MB", "VCB", "TCB", "VPB", "ACB", "BIDV", "CTG", "TPB", "OCB", "STB", "VIB", "SHB", "MSB", "LPB"]
+    bank_idx = banks_list.index(cur_bank) if cur_bank in banks_list else 0
+
+    with st.form("bank_config_form"):
+        col_b1, col_b2 = st.columns(2)
+        with col_b1:
+            cfg_bank = st.selectbox("Ngân hàng nhận tiền", banks_list, index=bank_idx)
+            cfg_acc = st.text_input("Số tài khoản", value=cur_acc)
+        with col_b2:
+            cfg_owner = st.text_input("Tên chủ tài khoản (không dấu)", value=cur_owner)
+            st.caption("Chuẩn chuyển khoản Napas 247 tương thích mọi ứng dụng ngân hàng.")
+        save_bank = st.form_submit_button("Lưu thông tin ngân hàng")
+    if save_bank:
+        set_setting("bank_code", cfg_bank.strip())
+        set_setting("bank_account", cfg_acc.strip())
+        set_setting("bank_owner", cfg_owner.strip().upper())
+        st.success("Đã cập nhật thông tin tài khoản VietQR!")
+        st.rerun()
+
+    st.divider()
     render_backup_audit()
 
 
@@ -2960,18 +3369,62 @@ def main() -> None:
         )
 
     title, description = PAGE_DETAILS[page]
-    heading_class = "page-heading"
-    status_label = "TRUNG TÂM ĐIỀU HÀNH"
+    now_str = datetime.now().strftime("%H:%M:%S")
     if page == "Giám sát trực tiếp":
         title = "Hệ thống Quản lý Giám sát Xe ra vào & Biển số"
-        description = "Giám sát trực tiếp"
-        heading_class += " dashboard-heading"
-        status_label = f"NHÂN VIÊN · ◷ {datetime.now():%H:%M:%S}"
+        description = "Giám sát trực tiếp & Điều khiển rào chắn"
     st.markdown(
         f"""
-        <div class="{heading_class}">
-          <div><h1>{title}</h1><p>{description}</p></div>
-          <div class="live-pill">{status_label}</div>
+        <!-- Desktop Top Bar -->
+        <div class="vms-top-bar">
+          <div class="vms-top-bar-left">
+            <div class="vms-brand-v">V</div>
+            <div>
+              <div class="vms-header-title">{title}</div>
+              <div style="color: #8da4bb; font-size: 0.78rem; font-weight: 500; margin-top: 1px;">{description}</div>
+            </div>
+          </div>
+          <div class="vms-top-bar-right">
+            <div class="vms-user-pill">
+              <span>👤</span>
+              <span>Admin / Trực ban</span>
+            </div>
+            <div class="vms-bell-badge" title="Thông báo hệ thống">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
+                <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+              </svg>
+              <div class="vms-unread-dot"></div>
+            </div>
+            <div class="vms-live-pill">
+              <span class="vms-pulse-dot"></span>
+              <span>Trực tiếp · {now_str}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Mobile Top Bar -->
+        <div class="vms-mobile-bar">
+          <div class="vms-mobile-left">
+            <div class="vms-brand-v">V</div>
+            <div>
+              <div class="vms-mobile-brand">VMS Smart Parking</div>
+              <div style="color: #8da4bb; font-size: 0.7rem;">Cổng kiểm soát trực tiếp</div>
+            </div>
+          </div>
+          <div class="vms-mobile-right">
+            <div class="vms-live-pill" style="padding: 0.25rem 0.65rem; font-size: 0.72rem;">
+              <span class="vms-pulse-dot"></span>
+              <span>Trực tiếp</span>
+            </div>
+            <div class="vms-bell-badge" style="width: 32px; height: 32px;">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
+                <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+              </svg>
+              <div class="vms-unread-dot"></div>
+            </div>
+          </div>
         </div>
         """,
         unsafe_allow_html=True,

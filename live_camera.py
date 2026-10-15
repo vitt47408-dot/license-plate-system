@@ -57,6 +57,25 @@ class AutomaticPlateProcessor:
         self._retry_after: dict[str, float] = {}
         self._messages: OrderedDict[str, str] = OrderedDict()
         self._status = "WAITING FOR CAMERA FRAME"
+        self._last_crop: np.ndarray | None = None
+        self._last_plate: str = ""
+        self._last_confidence: float = 0.0
+        self._last_plate_time: float = 0.0
+
+    @property
+    def last_crop(self) -> np.ndarray | None:
+        with self._state_lock:
+            return None if self._last_crop is None else self._last_crop.copy()
+
+    @property
+    def last_plate(self) -> str:
+        with self._state_lock:
+            return self._last_plate
+
+    @property
+    def last_confidence(self) -> float:
+        with self._state_lock:
+            return self._last_confidence
 
     @property
     def messages(self) -> list[str]:
@@ -150,9 +169,17 @@ class AutomaticPlateProcessor:
 
         for detection in detections:
             crop = self.detector.crop_plate(frame, detection)
+            if crop is not None and crop.size:
+                with self._state_lock:
+                    self._last_crop = crop
             result = self.ocr_service.recognize(crop)
             plate = normalize_plate(str(result.get("text") or ""))
             confidence = float(result.get("confidence") or 0)
+            if plate:
+                with self._state_lock:
+                    self._last_plate = plate
+                    self._last_confidence = confidence
+                    self._last_plate_time = current_time
             if (
                 not result.get("plate_like")
                 or confidence < self.minimum_consensus_confidence
