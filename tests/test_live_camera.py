@@ -78,7 +78,7 @@ class AutomaticPlateProcessorTests(unittest.TestCase):
         self.assertEqual(len(self.recorded), 1)
 
     def test_ignores_low_confidence_and_non_plate_ocr(self):
-        self.processor.ocr_service = FakeOCR(confidence=0.5)
+        self.processor.ocr_service = FakeOCR(confidence=0.39)
         self.processor.process(self.frame, now=1.0)
         self.processor.process(self.frame, now=2.0)
         self.assertEqual(self.recorded, [])
@@ -87,6 +87,18 @@ class AutomaticPlateProcessorTests(unittest.TestCase):
         self.processor.process(self.frame, now=3.0)
         self.processor.process(self.frame, now=4.0)
         self.assertEqual(self.recorded, [])
+
+    def test_records_repeated_plate_like_ocr_below_high_confidence_threshold(self):
+        self.processor.ocr_service = FakeOCR(confidence=0.458)
+
+        self.processor.process(self.frame, now=1.0)
+        self.processor.process(self.frame, now=2.0)
+        self.assertEqual(self.recorded, [])
+
+        self.processor.process(self.frame, now=3.0)
+        self.assertEqual(len(self.recorded), 1)
+        self.assertEqual(self.recorded[0][0:2], ("51A12345", "IN"))
+        self.assertAlmostEqual(self.recorded[0][3], 0.458)
 
     def test_restarts_consensus_after_sighting_gap(self):
         self.processor.process(self.frame, now=1.0)
@@ -123,9 +135,14 @@ class AutomaticPlateProcessorTests(unittest.TestCase):
         self.assertEqual(self.recorded, [])
         self.assertEqual(
             self.processor.status,
-            "GREEN ROI · OCR LOW / PLATE NOT CONFIRMED",
+            "PLATE ROI · CHECKING OCR 1/3",
         )
-        self.assertTrue(any("OCR chưa xác nhận" in message for message in self.processor.messages))
+        self.assertTrue(
+            any(
+                "51A12345: đang xác minh OCR (1/3, tin cậy 50%)" in message
+                for message in self.processor.messages
+            )
+        )
 
     def test_vehicle_model_failure_does_not_block_confirmed_plate(self):
         class FailedVehicleDetector(NoVehicleDetector):

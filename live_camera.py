@@ -41,6 +41,8 @@ class AutomaticPlateProcessor:
         self._model_load_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self.minimum_confidence = minimum_confidence
+        self.minimum_consensus_confidence = min(minimum_confidence, 0.40)
+        self.low_confidence_sightings = 3
         self.required_sightings = required_sightings
         self.scan_interval = scan_interval
         self.consensus_window = consensus_window
@@ -153,7 +155,7 @@ class AutomaticPlateProcessor:
             confidence = float(result.get("confidence") or 0)
             if (
                 not result.get("plate_like")
-                or confidence < self.minimum_confidence
+                or confidence < self.minimum_consensus_confidence
                 or len(plate) < 5
             ):
                 if result.get("text") or result.get("error"):
@@ -175,9 +177,18 @@ class AutomaticPlateProcessor:
             count = previous_count + 1 if current_time - previous_time <= self.consensus_window else 1
             self._sightings[plate] = (count, current_time)
 
-            if count < self.required_sightings:
-                self._status = f"PLATE ROI · CHECKING OCR {count}/{self.required_sightings}"
-                self._add_message(plate, f"{plate}: đang xác minh OCR ({count}/{self.required_sightings})")
+            required_sightings = (
+                self.required_sightings
+                if confidence >= self.minimum_confidence
+                else self.low_confidence_sightings
+            )
+            if count < required_sightings:
+                self._status = f"PLATE ROI · CHECKING OCR {count}/{required_sightings}"
+                self._add_message(
+                    plate,
+                    f"{plate}: đang xác minh OCR ({count}/{required_sightings}, "
+                    f"tin cậy {confidence:.0%})",
+                )
                 continue
 
             if plate in self._saved_in_visit:
