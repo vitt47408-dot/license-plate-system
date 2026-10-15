@@ -63,6 +63,11 @@ class AutomaticPlateProcessor:
         with self._state_lock:
             return list(self._messages.values())[-3:]
 
+    @property
+    def status(self) -> str:
+        with self._state_lock:
+            return self._status
+
     def _add_message(self, plate: str, message: str) -> None:
         with self._state_lock:
             self._messages[plate] = message
@@ -135,6 +140,19 @@ class AutomaticPlateProcessor:
                     key,
                     f"Mô hình {label} báo lỗi: {model_error}",
                 )
+        if self.require_vehicle_detection and not vehicle_detections:
+            vehicle_error = str(
+                getattr(self.vehicle_detector, "model_error", "") or ""
+            )
+            if vehicle_error:
+                self._status = "VEHICLE MODEL FAILED · AUTO-SAVE DISABLED"
+                self._add_message(
+                    "SYSTEM",
+                    "Chưa phát hiện xe vì model xe không tải được; cần kết nối mạng để tải yolov8n.pt.",
+                )
+                self._last_detections = []
+                self._last_vehicle_detections = []
+                return
         self._status = (
             f"PLATE ROI: {len(detections)} · VEHICLE ROI: {len(vehicle_detections)} · 1s"
             if detections

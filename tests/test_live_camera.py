@@ -122,6 +122,24 @@ class AutomaticPlateProcessorTests(unittest.TestCase):
         self.assertEqual(recorded, [])
         self.assertIn("AUTO-SAVE DISABLED", processor._status)
 
+    def test_explains_when_cloud_vehicle_weights_are_missing(self):
+        class FailedVehicleDetector(NoVehicleDetector):
+            model_error = "weight download failed"
+
+        processor = AutomaticPlateProcessor(
+            detector=FakeDetector(),
+            ocr_service=FakeOCR(),
+            direction="IN",
+            record_event=lambda *args: "saved",
+            vehicle_detector=FailedVehicleDetector(),
+            require_vehicle_detection=True,
+        )
+
+        processor.process(self.frame, now=1.0)
+
+        self.assertEqual(processor.status, "VEHICLE MODEL FAILED · AUTO-SAVE DISABLED")
+        self.assertTrue(any("model xe không tải được" in message for message in processor.messages))
+
     def test_defers_model_loading_until_first_camera_frame(self):
         loaded = []
         processor = AutomaticPlateProcessor(

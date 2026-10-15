@@ -765,8 +765,9 @@ def render_live_camera(direction: str, pair_code: str | None = None) -> None:
             "Camera đang truyền — lần đầu có thể cần thời gian tải mô hình; "
             "biển số hợp lệ sẽ tự ghi vào lịch sử."
         )
+        st.caption(f"Trạng thái nhận diện: {processor.status}")
         if processor.messages:
-            st.caption(" · ".join(processor.messages))
+            st.warning(" · ".join(processor.messages))
     else:
         st.info("Bấm **Bật camera** bên trên và cho phép trình duyệt truy cập camera.")
 

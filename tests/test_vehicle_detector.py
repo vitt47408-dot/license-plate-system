@@ -1,7 +1,12 @@
 import unittest
+import sys
+from pathlib import Path
+from unittest.mock import patch
+from types import ModuleType
 
 import numpy as np
 
+import vehicle_detector
 from vehicle_detector import VehicleDetector
 
 
@@ -32,6 +37,37 @@ class FakeModel:
 
 
 class VehicleDetectorTests(unittest.TestCase):
+    def test_falls_back_to_official_ultralytics_weight_when_local_file_missing(self):
+        model = FakeModel()
+        ultralytics = ModuleType("ultralytics")
+
+        def load_model(model_name):
+            self.assertEqual(model_name, "yolov8n.pt")
+            return model
+
+        ultralytics.YOLO = load_model
+        with patch.object(vehicle_detector, "VEHICLE_MODEL_PATH", Path("missing-yolov8n.pt")):
+            with patch.dict(sys.modules, {"ultralytics": ultralytics}):
+                detector = VehicleDetector()
+
+        self.assertIs(detector.model, model)
+        self.assertEqual(detector.model_source, "yolov8n.pt (Ultralytics pretrained)")
+        self.assertEqual(detector.model_error, "")
+
+    def test_reports_download_failure_when_official_weight_unavailable(self):
+        ultralytics = ModuleType("ultralytics")
+
+        def fail_download(model_name):
+            raise RuntimeError("network unavailable")
+
+        ultralytics.YOLO = fail_download
+        with patch.object(vehicle_detector, "VEHICLE_MODEL_PATH", Path("missing-yolov8n.pt")):
+            with patch.dict(sys.modules, {"ultralytics": ultralytics}):
+                detector = VehicleDetector()
+
+        self.assertIsNone(detector.model)
+        self.assertIn("network unavailable", detector.model_error)
+
     def test_only_detects_common_vehicle_classes(self):
         detector = VehicleDetector.__new__(VehicleDetector)
         detector.model = FakeModel()

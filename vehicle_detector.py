@@ -5,6 +5,7 @@ from typing import List
 
 import cv2
 import numpy as np
+from requests.exceptions import RequestException
 
 BASE_DIR = Path(__file__).resolve().parent
 VEHICLE_MODEL_PATH = BASE_DIR / "models" / "yolov8n.pt"
@@ -21,11 +22,25 @@ class VehicleDetector:
     def __init__(self) -> None:
         self.model = None
         self.model_error = ""
+        self.model_source = ""
         try:
             from ultralytics import YOLO
 
-            self.model = YOLO(str(VEHICLE_MODEL_PATH))
-        except (ImportError, OSError, ValueError, RuntimeError) as exc:
+            if VEHICLE_MODEL_PATH.is_file():
+                self.model_source = str(VEHICLE_MODEL_PATH)
+                self.model = YOLO(self.model_source)
+            else:
+                self.model_source = "yolov8n.pt (Ultralytics pretrained)"
+                self.model = YOLO("yolov8n.pt")
+        except (
+            ImportError,
+            OSError,
+            ValueError,
+            RuntimeError,
+            ConnectionError,
+            TimeoutError,
+            RequestException,
+        ) as exc:
             self.model_error = str(exc)
 
     def detect(self, image: np.ndarray) -> List[dict]:
