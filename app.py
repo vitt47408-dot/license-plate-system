@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import base64
 import io
 import shutil
 import sqlite3
@@ -16,14 +17,16 @@ import cv2
 import numpy as np
 import pandas as pd
 import streamlit as st
-from streamlit_webrtc import WebRtcMode, webrtc_streamer
 from PIL import Image
 
 from camera_relay import camera_relay
+from browser_camera_component import browser_camera
 from database import (
     add_event,
     add_ocr_sample,
     backup_database,
+    configure_database,
+    database_backend_configured,
     DB_PATH,
     delete_vehicle,
     export_history_csv,
@@ -54,6 +57,17 @@ from ocr_engine import OCRService
 from plate_detector import PlateDetector
 from live_camera import AutomaticPlateProcessor
 from vehicle_detector import VehicleDetector
+from storage import (
+    configure_object_storage,
+    current_prefix_uri,
+    delete_uri,
+    exists as stored_file_exists,
+    is_object_uri,
+    objects as stored_objects,
+    put_bytes,
+    read_bytes,
+    object_storage_enabled,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
@@ -71,27 +85,29 @@ PAGE_DETAILS = {
     "Quản lý xe": ("Quản lý xe", "Hồ sơ phương tiện, chủ xe và quyền ra vào."),
     "Báo cáo": ("Báo cáo", "Thống kê lượt xe và xuất lịch sử ra vào."),
     "Cấu hình": ("Cấu hình", "Thiết bị camera và mô hình nhận diện."),
+    "Huấn luyện model": ("Huấn luyện model", "Fine-tune YOLO plate detector trên dataset của bạn."),
 }
 
 
-def build_rtc_configuration(secrets=None) -> tuple[dict, bool]:
-    secret_values = st.secrets if secrets is None else secrets
-    ice_servers = [{"urls": ["stun:stun.l.google.com:19302"]}]
-    turn_urls = secret_values.get("WEBRTC_TURN_URLS", [])
-    if isinstance(turn_urls, str):
-        turn_urls = [turn_urls]
-    turn_urls = [url.strip() for url in turn_urls if isinstance(url, str) and url.strip()]
+MAX_BROWSER_FRAME_BYTES = 1_500_000
 
-    turn_username = str(secret_values.get("WEBRTC_TURN_USERNAME", "")).strip()
-    turn_credential = str(secret_values.get("WEBRTC_TURN_CREDENTIAL", "")).strip()
-    turn_configured = bool(turn_urls and turn_username and turn_credential)
-    if turn_configured:
-        ice_servers.append({
-            "urls": turn_urls,
-            "username": turn_username,
-            "credential": turn_credential,
-        })
-    return {"iceServers": ice_servers}, turn_configured
+
+def decode_browser_camera_frame(payload: dict) -> np.ndarray:
+    frame_data = payload.get("frame")
+    if not isinstance(frame_data, str) or not frame_data:
+        raise ValueError("Camera chưa gửi khung hình.")
+    if len(frame_data) > MAX_BROWSER_FRAME_BYTES * 4 // 3 + 8:
+        raise ValueError("Khung hình camera vượt giới hạn 1.5 MB.")
+    try:
+        encoded = base64.b64decode(frame_data, validate=True)
+    except (ValueError, base64.binascii.Error) as exc:
+        raise ValueError("Dữ liệu ảnh camera không hợp lệ.") from exc
+    if not encoded or len(encoded) > MAX_BROWSER_FRAME_BYTES:
+        raise ValueError("Khung hình camera rỗng hoặc vượt giới hạn 1.5 MB.")
+    frame = cv2.imdecode(np.frombuffer(encoded, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if frame is None or frame.size == 0:
+        raise ValueError("Không giải mã được khung hình camera.")
+    return frame
 
 
 def apply_app_styles() -> None:
@@ -408,6 +424,8 @@ def save_uploaded_file(uploaded_file) -> str:
     target = UPLOAD_DIR / name
     with open(target, "wb") as f:
         f.write(content)
+    if object_storage_enabled():
+        put_bytes(f"uploads/{name}", content, uploaded_file.type or "application/octet-stream")
     st.session_state[cache_key] = str(target)
     return str(target)
 
@@ -417,9 +435,11 @@ def save_evidence_file(uploaded_file) -> str:
         return ""
     safe_name = Path(uploaded_file.name).name.replace(" ", "_")
     name = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{safe_name}"
+    content = uploaded_file.getvalue()
+    if object_storage_enabled():
+        return put_bytes(f"evidence/{name}", content, uploaded_file.type or "application/octet-stream")
     target = EVIDENCE_DIR / name
-    with open(target, "wb") as f:
-        f.write(uploaded_file.getvalue())
+    target.write_bytes(content)
     return str(target)
 
 
@@ -427,8 +447,12 @@ def save_frame_evidence(frame: np.ndarray) -> str:
     success, encoded = cv2.imencode(".jpg", frame)
     if not success:
         raise ValueError("Không thể mã hóa ảnh minh chứng.")
-    target = EVIDENCE_DIR / f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_capture.jpg"
-    target.write_bytes(encoded.tobytes())
+    name = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_capture.jpg"
+    content = encoded.tobytes()
+    if object_storage_enabled():
+        return put_bytes(f"evidence/{name}", content, "image/jpeg")
+    target = EVIDENCE_DIR / name
+    target.write_bytes(content)
     return str(target)
 
 
@@ -444,19 +468,35 @@ def save_confirmed_ocr_sample(
     success, encoded = cv2.imencode(".jpg", crop)
     if not success:
         raise ValueError("Không thể mã hóa ảnh cắt biển số.")
-    target = OCR_SAMPLE_DIR / f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_ocr.jpg"
-    target.write_bytes(encoded.tobytes())
+    name = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_ocr.jpg"
+    if object_storage_enabled():
+        target_path = put_bytes(f"evidence/ocr_samples/{name}", encoded.tobytes(), "image/jpeg")
+    else:
+        target = OCR_SAMPLE_DIR / name
+        target.write_bytes(encoded.tobytes())
+        target_path = str(target)
     try:
         return add_ocr_sample(
             predicted_text,
             confirmed_text,
             confidence,
-            str(target),
+            target_path,
             source_type,
         )
     except (OSError, ValueError, sqlite3.Error):
-        target.unlink(missing_ok=True)
+        if is_object_uri(target_path):
+            delete_uri(target_path)
+        else:
+            Path(target_path).unlink(missing_ok=True)
         raise
+
+
+def image_exists(image_path: str) -> bool:
+    return bool(image_path) and stored_file_exists(image_path)
+
+
+def image_content(image_path: str):
+    return read_bytes(image_path) if is_object_uri(image_path) else image_path
 
 
 def read_frame_from_video(video_path: str, frame_number: int = 0):
@@ -661,25 +701,28 @@ def record_live_camera_event(
     )
 
 
+@st.fragment
 def render_live_camera(direction: str, pair_code: str | None = None) -> None:
-    rtc_configuration, turn_configured = build_rtc_configuration()
     st.caption(
-        "Bật camera trình duyệt bằng nút START. App quét tối đa mỗi 1 giây, "
+        "Bật camera trình duyệt bằng nút bên dưới. App nhận khung hình qua HTTPS mỗi khoảng 1 giây, "
         "tự lưu biển số đúng định dạng khi OCR đạt từ 65% trong ít nhất 2 lần đọc; "
         "các lượt cùng biển số/hướng trong 25 giây được lọc trùng."
     )
     st.caption(
         "Khung xanh XE khoanh thân xe; khung xanh BIEN SO khoanh biển số. "
-        "Chỉ tự lưu khi thấy cả xe thật lẫn biển số; biển số đang hiển thị trên điện thoại/ảnh sẽ không được ghi."
+        "Video truyền qua kết nối HTTPS của ứng dụng, không sử dụng WebRTC, STUN hoặc TURN."
     )
 
-    def create_processor() -> AutomaticPlateProcessor:
-        frame_publisher = None
-        if pair_code:
-            def frame_publisher(frame: np.ndarray) -> None:
-                camera_relay.publish(pair_code, frame)
-
-        return AutomaticPlateProcessor(
+    camera_key = f"{pair_code or 'local'}_{direction}"
+    processor_key = f"browser_camera_processor_{camera_key}"
+    processor = st.session_state.get(processor_key)
+    if processor is None:
+        frame_publisher = (
+            (lambda frame: camera_relay.publish(pair_code, frame))
+            if pair_code
+            else None
+        )
+        processor = AutomaticPlateProcessor(
             detector=None,
             ocr_service=None,
             direction=direction,
@@ -689,48 +732,50 @@ def render_live_camera(direction: str, pair_code: str | None = None) -> None:
             frame_publisher=frame_publisher,
             model_loader=get_live_camera_models,
         )
+        st.session_state[processor_key] = processor
 
-    context = webrtc_streamer(
-        key=f"automatic_plate_camera_{direction}_{pair_code or 'local'}",
-        mode=WebRtcMode.SENDRECV,
-        video_processor_factory=create_processor,
-        media_stream_constraints={
-            "video": {
-                "width": {"ideal": 960},
-                "height": {"ideal": 540},
-                "frameRate": {"ideal": 15, "max": 15},
-            },
-            "audio": False,
-        },
-        async_processing=True,
-        rtc_configuration=rtc_configuration,
+    capture = browser_camera(
+        key=f"browser_camera_{camera_key}",
+        camera_facing_mode="environment",
+        max_width=640,
+        capture_interval_ms=1100,
     )
-    if context.state.playing:
+    if capture and capture.get("error"):
+        st.error(f"Không mở được camera: {capture['error']}")
+    elif capture and capture.get("frame"):
+        frame_key = f"browser_camera_last_timestamp_{camera_key}"
+        timestamp = capture.get("timestamp")
+        if timestamp != st.session_state.get(frame_key):
+            try:
+                frame = decode_browser_camera_frame(capture)
+                annotated = processor.process(frame)
+            except (ValueError, cv2.error) as exc:
+                st.error(f"Không xử lý được ảnh camera: {exc}")
+                return
+            st.session_state[frame_key] = timestamp
+            st.session_state[f"browser_camera_last_image_{camera_key}"] = annotated
+        image = st.session_state.get(f"browser_camera_last_image_{camera_key}")
+        if image is not None:
+            st.image(
+                cv2.cvtColor(image, cv2.COLOR_BGR2RGB),
+                caption="Hình camera đã nhận qua kết nối HTTPS",
+                use_container_width=True,
+            )
         st.success(
-            "Camera đang chạy — lần đầu bật có thể cần thời gian tải mô hình; "
+            "Camera đang truyền — lần đầu có thể cần thời gian tải mô hình; "
             "biển số hợp lệ sẽ tự ghi vào lịch sử."
         )
+        if processor.messages:
+            st.caption(" · ".join(processor.messages))
     else:
-        st.info("Nhấn START trong khung camera và cho phép trình duyệt truy cập camera.")
-        if not turn_configured:
-            st.warning(
-                "Camera chưa kết nối được qua STUN. Mạng công ty/trường học hoặc một số Wi-Fi "
-                "có thể chặn WebRTC; hiện ứng dụng chưa cấu hình TURN. Thử đổi sang mạng khác "
-                "hoặc thêm TURN credentials vào Streamlit Secrets."
-            )
-            st.code(
-                'WEBRTC_TURN_URLS = ["turn:your-turn-server:3478?transport=tcp"]\n'
-                'WEBRTC_TURN_USERNAME = "your-username"\n'
-                'WEBRTC_TURN_CREDENTIAL = "your-secret-credential"',
-                language="toml",
-            )
+        st.info("Bấm **Bật camera** bên trên và cho phép trình duyệt truy cập camera.")
 
 
 def render_remote_camera_link() -> None:
     st.markdown("### Liên kết camera điện thoại với máy tính")
     st.caption(
-        "Điện thoại phát camera qua HTTPS; máy tính nhập mã ghép đôi để xem hình trực tiếp. "
-        "Cả hai thiết bị cần mở ứng dụng và đăng nhập."
+        "Điện thoại gửi ảnh camera đến ứng dụng qua HTTPS; máy tính dùng cùng mã để xem hình. "
+        "Không cần kết nối WebRTC, STUN hoặc TURN. Cả hai thiết bị cần mở ứng dụng và đăng nhập."
     )
     role = st.radio(
         "Thiết bị này sẽ",
@@ -792,30 +837,24 @@ def render_remote_camera_link() -> None:
             st.session_state.pop("remote_camera_viewer_code", None)
             st.warning("Mã liên kết đã hết hạn. Tạo mã mới trên điện thoại.")
         else:
-            track = st.session_state.get("remote_camera_viewer_track")
-            if (
-                track is None
-                or st.session_state.get("remote_camera_viewer_track_code") != pair_code
-            ):
-                try:
-                    track = camera_relay.create_track(pair_code)
-                except ValueError as exc:
-                    st.error(f"Không thể mở camera đã ghép: {exc}")
+            @st.fragment(run_every=1)
+            def render_remote_camera_frame() -> None:
+                if not camera_relay.has_pairing_code(pair_code):
+                    st.warning("Mã liên kết đã hết hạn. Tạo mã mới trên điện thoại.")
                     return
-                st.session_state["remote_camera_viewer_track"] = track
-                st.session_state["remote_camera_viewer_track_code"] = pair_code
+                frame, is_live = camera_relay.latest_frame(pair_code)
+                if frame is None:
+                    st.info("Đang chờ điện thoại bật camera và gửi khung hình...")
+                elif is_live:
+                    st.image(
+                        cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
+                        caption="Camera điện thoại · truyền qua HTTPS",
+                        use_container_width=True,
+                    )
+                else:
+                    st.warning("Không nhận được khung hình mới. Kiểm tra camera trên điện thoại.")
 
-            st.info("Đang chờ video từ điện thoại. Bấm START nếu chưa kết nối.")
-            context = webrtc_streamer(
-                key=f"remote_camera_viewer_{pair_code}",
-                mode=WebRtcMode.RECVONLY,
-                source_video_track=track,
-                media_stream_constraints={"video": False, "audio": False},
-                async_processing=True,
-                rtc_configuration=build_rtc_configuration()[0],
-            )
-            if context.state.playing:
-                st.success("Đã kết nối luồng camera từ xa.")
+            render_remote_camera_frame()
 
 
 def reset_live_capture() -> None:
@@ -1062,13 +1101,13 @@ def render_overview() -> None:
             latest_image = next(
                 (
                     event for event in recent_events
-                    if event.get("image_path") and Path(event["image_path"]).is_file()
+                    if image_exists(event.get("image_path", ""))
                 ),
                 None,
             )
             if latest_image:
                 st.image(
-                    latest_image["image_path"],
+                    image_content(latest_image["image_path"]),
                     caption=f"Ảnh gần nhất · {latest_image['plate_number']}",
                     use_container_width=True,
                 )
@@ -1274,8 +1313,8 @@ def render_overview() -> None:
                 )
                 st.write(vehicle.get("owner_name") or "Chủ xe chưa cập nhật")
             image_path = selected_event.get("image_path")
-            if image_path and Path(image_path).is_file():
-                st.image(image_path, caption="Ảnh sự kiện", use_container_width=True)
+            if image_exists(image_path):
+                st.image(image_content(image_path), caption="Ảnh sự kiện", use_container_width=True)
             if selected_event.get("status") != "confirmed":
                 corrected_plate = st.text_input(
                     "Xác nhận biển số",
@@ -1766,8 +1805,8 @@ def render_plate_recognition(
                 )
             with event_evidence:
                 image_path = saved_event.get("image_path")
-                if image_path and Path(image_path).is_file():
-                    st.image(image_path, caption="Ảnh bằng chứng sự kiện", use_container_width=True)
+                if image_exists(image_path):
+                    st.image(image_content(image_path), caption="Ảnh bằng chứng sự kiện", use_container_width=True)
                 else:
                     st.info("Không có ảnh bằng chứng.")
 
@@ -1880,8 +1919,8 @@ def render_access_log() -> None:
                 st.markdown(f"**Ghi chú:** {last_manual_event.get('notes') or '—'}")
             with event_evidence:
                 image_path = last_manual_event.get("image_path")
-                if image_path and Path(image_path).is_file():
-                    st.image(image_path, caption="Ảnh bằng chứng sự kiện", use_container_width=True)
+                if image_exists(image_path):
+                    st.image(image_content(image_path), caption="Ảnh bằng chứng sự kiện", use_container_width=True)
                 else:
                     st.info("Sự kiện này chưa có ảnh bằng chứng.")
 
@@ -1923,9 +1962,9 @@ def render_access_log() -> None:
                 images_shown = False
                 for event in recent_events:
                     image_path = event.get("image_path")
-                    if image_path and Path(image_path).is_file():
+                    if image_exists(image_path):
                         st.image(
-                            image_path,
+                            image_content(image_path),
                             caption=(
                                 f"{event['plate_number']} · "
                                 f"{'Xe vào' if event['direction'] == 'IN' else 'Xe ra'} · "
@@ -2099,9 +2138,9 @@ def render_history() -> None:
             with st.expander("Ảnh minh chứng trong kết quả"):
                 for event in events:
                     image_path = event.get("image_path")
-                    if image_path and Path(image_path).is_file():
+                    if image_exists(image_path):
                         st.image(
-                            image_path,
+                            image_content(image_path),
                             caption=f"{event['plate_number']} · {'Xe vào' if event['direction'] == 'IN' else 'Xe ra'} · {event['event_time']}",
                             width=480,
                         )
@@ -2114,8 +2153,8 @@ def render_history() -> None:
         st.subheader(f"Sự kiện cần xác minh ({len(unresolved)})")
         for event in unresolved:
             with st.expander(f"#{event['id']} · {event['plate_number']} · {event['event_time']}"):
-                if event.get("image_path") and Path(event["image_path"]).is_file():
-                    st.image(event["image_path"], width=480)
+                if image_exists(event.get("image_path", "")):
+                    st.image(image_content(event["image_path"]), width=480)
                 st.write(f"Độ tin cậy OCR: {event.get('confidence', 0):.3f}")
                 corrected_plate = st.text_input(
                     "Biển số người quản lý xác nhận",
@@ -2247,7 +2286,6 @@ def render_ai_training() -> None:
     if ocr_samples:
         sample_rows = []
         for sample in ocr_samples:
-            image_path = Path(sample["image_path"])
             sample_rows.append({
                 "id": sample["id"],
                 "ground_truth": sample["confirmed_text"],
@@ -2255,7 +2293,7 @@ def render_ai_training() -> None:
                 "confidence": sample["confidence"],
                 "source": sample["source_type"],
                 "created_at": sample["created_at"],
-                "image_file": image_path.name,
+                "image_file": sample["image_path"].replace("\\", "/").rsplit("/", 1)[-1],
             })
         samples_df = pd.DataFrame(sample_rows)
         st.metric("Số mẫu đã xác nhận", len(ocr_samples))
@@ -2272,11 +2310,12 @@ def render_ai_training() -> None:
         with zipfile.ZipFile(archive_buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             archive.writestr("labels.csv", samples_df.to_csv(index=False).encode("utf-8-sig"))
             for sample in ocr_samples:
-                sample_path = Path(sample["image_path"])
-                if sample_path.is_file():
-                    archive.write(
-                        sample_path,
-                        arcname=f"images/{sample['id']}_{sample['confirmed_text']}{sample_path.suffix.lower()}",
+                sample_path = sample["image_path"]
+                if image_exists(sample_path):
+                    suffix = PurePosixPath(sample_path).suffix.lower() or ".jpg"
+                    archive.writestr(
+                        f"images/{sample['id']}_{sample['confirmed_text']}{suffix}",
+                        read_bytes(sample_path),
                     )
         zip_column.download_button(
             "Tải ZIP ảnh và nhãn",
@@ -2468,12 +2507,173 @@ def render_ai_training() -> None:
                 st.error(f"Đánh giá YOLO thất bại: {exc}")
 
 
+def render_train_page() -> None:
+    import tempfile
+    import yaml
+    from train_plate_detector import (
+        deploy_best_model,
+        prepare_dataset_from_zip,
+        train_plate_detector,
+    )
+
+    st.markdown(
+        """
+        Fine-tune detector YOLOv8 trên CPU. Dataset phải có bounding box biển số ở định dạng YOLO,
+        với ảnh và nhãn tách riêng cho train/validation.
+        """
+    )
+    st.info(
+        """
+        **Lưu ý khi chạy trên CPU/Cloud:** huấn luyện có thể mất nhiều thời gian và tiêu tốn tài nguyên.
+        Bắt đầu với YOLOv8n, ảnh 416 px, batch 4 và ít epoch; không đóng trang trong khi đang train.
+        """
+    )
+    with st.expander("1. Chuẩn bị dataset", expanded=True):
+        st.markdown(
+            """
+            Tải dataset biển số YOLO, ví dụ [Kaggle – VNLicensePlate](https://www.kaggle.com/datasets/bomaich/vnlicenseplate),
+            rồi nén thư mục dataset thành ZIP. ZIP cần có đúng một `data.yaml`, thư mục ảnh train/val
+            và nhãn `.txt` tương ứng. Mỗi nhãn theo định dạng YOLO:
+            `class_id x_center y_center width height` với tọa độ từ 0 đến 1.
+            """
+        )
+        st.code(
+            "dataset.zip\n"
+            "├── data.yaml\n"
+            "├── images/train/\n"
+            "├── images/val/\n"
+            "├── labels/train/\n"
+            "└── labels/val/",
+            language="text",
+        )
+        st.caption(
+            "Ứng dụng sẽ kiểm tra đường dẫn ZIP và thư mục train/val, sau đó tự sửa `path` trong data.yaml "
+            "theo vị trí giải nén. Không tải ảnh/video chưa có nhãn bounding box."
+        )
+
+    uploaded = st.file_uploader(
+        "2. Upload dataset (.zip)",
+        type=["zip"],
+        key="plate_training_dataset_zip",
+    )
+    columns = st.columns(3)
+    with columns[0]:
+        epochs = st.number_input("Số epochs", min_value=1, max_value=100, value=5, step=1)
+    with columns[1]:
+        image_size = st.selectbox("Kích thước ảnh", [320, 416, 480, 640], index=1)
+    with columns[2]:
+        batch = st.selectbox("Batch size", [2, 4, 8], index=1)
+    model_name = st.selectbox(
+        "Model khởi tạo",
+        ["yolov8n.pt", "yolov8s.pt"],
+        index=0,
+        help="yolov8n nhẹ hơn và phù hợp hơn với CPU.",
+    )
+
+    trained_artifact = st.session_state.get("trained_plate_model_download")
+    if trained_artifact:
+        st.download_button(
+            "Tải model đã huấn luyện (.pt)",
+            data=trained_artifact["content"],
+            file_name=trained_artifact["filename"],
+            mime="application/octet-stream",
+            key="download_trained_plate_model",
+            on_click="ignore",
+        )
+
+    if not st.button(
+        "Bắt đầu huấn luyện",
+        type="primary",
+        use_container_width=True,
+        disabled=uploaded is None,
+        key="start_uploaded_plate_training",
+    ):
+        return
+
+    dataset_bytes = uploaded.getvalue()
+    if not dataset_bytes:
+        st.error("File dataset ZIP rỗng.")
+        return
+
+    runs_dir = BASE_DIR / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    progress = st.progress(0)
+    progress_text = st.empty()
+    run_name = datetime.now().strftime("streamlit_%Y%m%d_%H%M%S")
+    try:
+        with tempfile.TemporaryDirectory(prefix="plate_dataset_", dir=runs_dir) as temp_dir:
+            data_yaml = prepare_dataset_from_zip(
+                dataset_bytes,
+                Path(temp_dir) / "dataset",
+            )
+            progress_text.info(f"Đã xác thực dataset: `{data_yaml}`. Đang huấn luyện trên CPU...")
+
+            def update_training_progress(epoch: int, total_epochs: int) -> None:
+                progress.progress(min(99, int(epoch * 100 / total_epochs)))
+                progress_text.info(f"Đang huấn luyện: epoch {epoch}/{total_epochs}")
+
+            best_weights = train_plate_detector(
+                data_yaml=data_yaml,
+                epochs=int(epochs),
+                imgsz=int(image_size),
+                batch=int(batch),
+                model_name=model_name,
+                project=BASE_DIR / "runs" / "plate_detect",
+                name=run_name,
+                device="cpu",
+                progress_callback=update_training_progress,
+            )
+        deployed = deploy_best_model(best_weights, MODEL_DIR / "plate_detector_yolov8n.pt")
+        get_plate_detector.clear()
+        progress.progress(100)
+        progress_text.success(f"Huấn luyện hoàn tất. Model đang hoạt động: `{deployed}`")
+        st.balloons()
+        st.session_state["trained_plate_model_download"] = {
+            "content": deployed.read_bytes(),
+            "filename": deployed.name,
+        }
+        st.download_button(
+            "Tải model đã huấn luyện (.pt)",
+            data=st.session_state["trained_plate_model_download"]["content"],
+            file_name=st.session_state["trained_plate_model_download"]["filename"],
+            mime="application/octet-stream",
+            key=f"download_plate_model_{run_name}",
+            on_click="ignore",
+        )
+        st.caption(
+            "Trên máy chủ có filesystem tạm thời, hãy tải model xuống và lưu giữ bản sao bên ngoài app."
+        )
+        try:
+            log_audit(
+                "yolo_training_finished",
+                "ai_model",
+                deployed.name,
+                f"epochs={epochs}; imgsz={image_size}; batch={batch}; model={model_name}",
+            )
+        except sqlite3.Error as exc:
+            st.warning(f"Model đã huấn luyện và được cài đặt, nhưng không ghi được nhật ký: {exc}")
+    except (
+        ImportError,
+        OSError,
+        ValueError,
+        RuntimeError,
+        zipfile.BadZipFile,
+        yaml.YAMLError,
+        AttributeError,
+        TypeError,
+        KeyError,
+    ) as exc:
+        progress_text.error(f"Huấn luyện thất bại: {exc}")
+        st.exception(exc)
+
+
 def create_backup_package(output_path: Path) -> str:
     with tempfile.TemporaryDirectory(prefix="plate_backup_", dir=EXPORT_DIR) as temp_dir:
         database_path = Path(temp_dir) / "license_plate.db"
         backup_database(str(database_path))
         with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             archive.write(database_path, "license_plate.db")
+            archived_names = set()
             for source_dir, archive_root in (
                 (EVIDENCE_DIR, "evidence"),
                 (UPLOAD_DIR, "uploads"),
@@ -2485,6 +2685,12 @@ def create_backup_package(output_path: Path) -> str:
                             *source_file.relative_to(source_dir).parts,
                         ).as_posix()
                         archive.write(source_file, archive_name)
+                        archived_names.add(archive_name)
+            for category in ("evidence", "uploads"):
+                for relative_name, content in stored_objects(category):
+                    archive_name = PurePosixPath(category, relative_name).as_posix()
+                    if archive_name not in archived_names:
+                        archive.writestr(archive_name, content)
     return str(output_path)
 
 
@@ -2539,12 +2745,26 @@ def restore_backup_package(uploaded_file) -> str:
             for info, path in entries:
                 if path.as_posix() == "license_plate.db" or info.is_dir():
                     continue
-                target = storage_dirs[path.parts[0]].joinpath(*path.parts[1:])
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with archive.open(info) as source, target.open("wb") as output:
-                    shutil.copyfileobj(source, output)
+                content = archive.read(info)
+                category = path.parts[0]
+                relative_name = "/".join(path.parts[1:])
+                if object_storage_enabled():
+                    put_bytes(f"{category}/{relative_name}", content)
+                    if category == "uploads":
+                        target = storage_dirs[category].joinpath(*path.parts[1:])
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(content)
+                else:
+                    target = storage_dirs[category].joinpath(*path.parts[1:])
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(content)
 
-        restored_path = restore_database(str(staged_database), str(EVIDENCE_DIR))
+        evidence_root = (
+            current_prefix_uri("evidence")
+            if object_storage_enabled()
+            else str(EVIDENCE_DIR)
+        )
+        restored_path = restore_database(str(staged_database), evidence_root)
 
     init_db()
     log_audit(
@@ -2562,16 +2782,24 @@ def render_backup_audit() -> None:
         st.success(restore_message)
 
     st.subheader("Vị trí lưu dữ liệu")
-    st.write("Dữ liệu được lưu trên máy đang chạy ứng dụng:")
+    if database_backend_configured():
+        st.write("Dữ liệu chính được lưu trên PostgreSQL đã cấu hình.")
+    else:
+        st.write("Dữ liệu chính được lưu trên máy đang chạy ứng dụng.")
+    image_location = current_prefix_uri("evidence") if object_storage_enabled() else str(EVIDENCE_DIR)
+    upload_location = current_prefix_uri("uploads") if object_storage_enabled() else str(UPLOAD_DIR)
+    database_location = "PostgreSQL (DATABASE_URL)" if database_backend_configured() else str(DB_PATH)
     st.code(
-        f"Database: {DB_PATH}\nẢnh bằng chứng: {EVIDENCE_DIR}\nFile tải lên: {UPLOAD_DIR}",
+        f"Database: {database_location}\nẢnh bằng chứng: {image_location}\nFile tải lên: {upload_location}",
         language="text",
     )
-    if DB_PATH.is_file():
-        st.caption(f"Database hiện có ({DB_PATH.stat().st_size:,} byte).")
+    if database_backend_configured():
+        st.caption("Kết nối PostgreSQL đang được sử dụng.")
+    elif DB_PATH.is_file():
+        st.caption(f"Database SQLite hiện có ({DB_PATH.stat().st_size:,} byte).")
     else:
         st.warning("Chưa thấy file database; file sẽ được tạo khi ứng dụng khởi tạo.")
-    st.caption("Thông tin xe/lịch sử nằm trong SQLite; ảnh bằng chứng và file tải lên được lưu riêng.")
+    st.caption("Thông tin xe/lịch sử nằm trong database; ảnh và file tải lên được lưu riêng.")
 
     st.divider()
     st.subheader("Sao lưu và khôi phục")
@@ -2714,6 +2942,8 @@ def main() -> None:
         initial_sidebar_state="auto",
     )
     apply_app_styles()
+    configure_database(str(st.secrets.get("DATABASE_URL", "")))
+    configure_object_storage(st.secrets)
     require_app_password()
     ensure_dirs()
     init_db()
@@ -2742,6 +2972,7 @@ def main() -> None:
                 "Quản lý xe",
                 "Báo cáo",
                 "Cấu hình",
+                "Huấn luyện model",
             ],
             format_func=lambda item: {
                 "Giám sát trực tiếp": "▣  Giám sát trực tiếp",
@@ -2749,6 +2980,7 @@ def main() -> None:
                 "Quản lý xe": "▱  Quản lý xe",
                 "Báo cáo": "▤  Báo cáo",
                 "Cấu hình": "⚙  Cấu hình",
+                "Huấn luyện model": "🧠  Huấn luyện model",
             }[item],
             key="main_page",
         )
@@ -2779,6 +3011,8 @@ def main() -> None:
         render_history()
     elif page == "Báo cáo":
         render_reports()
+    elif page == "Huấn luyện model":
+        render_train_page()
     else:
         render_config()
 

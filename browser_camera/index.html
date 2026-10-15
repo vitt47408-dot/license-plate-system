@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: "Segoe UI", sans-serif;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: transparent; color: #e7eef7; }
+      .camera-shell { display: grid; gap: 8px; width: 100%; }
+      video {
+        display: block;
+        width: 100%;
+        max-height: 360px;
+        aspect-ratio: 16 / 9;
+        border-radius: 8px;
+        background: #101923;
+        object-fit: contain;
+      }
+      .camera-controls { display: flex; align-items: center; gap: 12px; min-height: 40px; }
+      button {
+        border: 0;
+        border-radius: 6px;
+        padding: 9px 18px;
+        background: #39c6bd;
+        color: #08222c;
+        font-size: 14px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      button:disabled { cursor: wait; opacity: 0.65; }
+      [role="status"] { color: #a9bacb; font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <div class="camera-shell">
+      <video autoplay playsinline muted></video>
+      <div class="camera-controls">
+        <button type="button">Bật camera</button>
+        <span role="status">Camera đang tắt</span>
+      </div>
+    </div>
+    <script>
+      (() => {
+        const video = document.querySelector("video");
+        const button = document.querySelector("button");
+        const status = document.querySelector('[role="status"]');
+        let stream = null;
+        let timer = null;
+        let busy = false;
+        let maxWidth = 640;
+        let captureIntervalMs = 1100;
+        let cameraFacingMode = "environment";
+
+        function post(type, payload = {}) {
+          window.parent.postMessage(
+            { isStreamlitMessage: true, type, ...payload },
+            "*",
+          );
+        }
+
+        function stopCamera(notify = false) {
+          if (timer !== null) {
+            window.clearInterval(timer);
+            timer = null;
+          }
+          if (stream) {
+            stream.getTracks().forEach((track) => track.stop());
+            stream = null;
+          }
+          video.srcObject = null;
+          button.textContent = "Bật camera";
+          status.textContent = "Camera đang tắt";
+          if (notify) {
+            post("streamlit:setComponentValue", {
+              value: { stopped: true, timestamp: Date.now() },
+              dataType: "json",
+            });
+          }
+        }
+
+        function sendError(error) {
+          status.textContent = error.message || "Không thể mở camera";
+          post("streamlit:setComponentValue", {
+            value: { error: status.textContent, timestamp: Date.now() },
+            dataType: "json",
+          });
+        }
+
+        async function captureFrame() {
+          if (busy || !stream || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+          busy = true;
+          try {
+            const scale = Math.min(1, maxWidth / video.videoWidth);
+            const canvas = document.createElement("canvas");
+            canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+            canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+            canvas.getContext("2d", { alpha: false }).drawImage(video, 0, 0, canvas.width, canvas.height);
+            const blob = await new Promise((resolve, reject) => {
+              canvas.toBlob(
+                (result) => result ? resolve(result) : reject(new Error("Không mã hóa được khung hình camera")),
+                "image/jpeg",
+                0.58,
+              );
+            });
+            const bytes = new Uint8Array(await blob.arrayBuffer());
+            let binary = "";
+            for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+              binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+            }
+            post("streamlit:setComponentValue", {
+              value: {
+                frame: window.btoa(binary),
+                timestamp: Date.now(),
+                width: canvas.width,
+                height: canvas.height,
+              },
+              dataType: "json",
+            });
+          } catch (error) {
+            sendError(error);
+            stopCamera();
+          } finally {
+            busy = false;
+          }
+        }
+
+        async function startCamera() {
+          if (stream) {
+            stopCamera(true);
+            return;
+          }
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            sendError(new Error("Trình duyệt không hỗ trợ camera. Hãy mở ứng dụng bằng HTTPS."));
+            return;
+          }
+          button.disabled = true;
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: {
+                facingMode: { ideal: cameraFacingMode },
+                width: { ideal: 640, max: 960 },
+                height: { ideal: 360, max: 540 },
+                frameRate: { ideal: 10, max: 15 },
+              },
+              audio: false,
+            });
+            stream.getTracks().forEach((track) => {
+              track.addEventListener("ended", () => {
+                sendError(new Error("Camera đã bị ngắt. Hãy bật camera lại."));
+                stopCamera();
+              }, { once: true });
+            });
+            video.srcObject = stream;
+            await video.play();
+            button.textContent = "Tắt camera";
+            status.textContent = "Đang truyền ảnh qua HTTPS (không dùng STUN/TURN)";
+            timer = window.setInterval(captureFrame, captureIntervalMs);
+            await captureFrame();
+          } catch (error) {
+            sendError(error);
+            stopCamera();
+          } finally {
+            button.disabled = false;
+          }
+        }
+
+        button.addEventListener("click", startCamera);
+        window.addEventListener("message", (event) => {
+          if (event.source !== window.parent || event.data?.type !== "streamlit:render") return;
+          const args = event.data.args || {};
+          maxWidth = Math.max(320, Math.min(960, Number(args.maxWidth) || 640));
+          captureIntervalMs = Math.max(800, Number(args.captureIntervalMs) || 1100);
+          cameraFacingMode = args.cameraFacingMode === "user" ? "user" : "environment";
+          post("streamlit:setFrameHeight", { height: 420 });
+        });
+        post("streamlit:componentReady", { apiVersion: 1 });
+      })();
+    </script>
+  </body>
+</html>

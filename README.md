@@ -107,7 +107,7 @@ streamlit run app.py --server.address 0.0.0.0 --server.port 8501
 
 Trên máy tính, chạy `ipconfig`, lấy địa chỉ IPv4 của adapter Wi-Fi, rồi mở `http://<IPv4-của-máy-tính>:8501` trên điện thoại. Ví dụ: `http://192.168.1.25:8501`. Nếu Windows Firewall hỏi, chỉ cho phép trên mạng Private.
 
-Trong trang **Giám sát trực tiếp**, chọn **Camera trực tiếp (tự động)** và bấm **START** để cấp quyền camera. App nhận video liên tục từ chính thiết bị mở trang; không dùng camera server để thay camera điện thoại.
+Trong trang **Giám sát trực tiếp**, chọn **Camera trực tiếp (tự động)** và bấm **Bật camera** để cấp quyền. App nhận ảnh định kỳ từ chính thiết bị mở trang, không yêu cầu TURN/STUN.
 
 #### Deploy lên máy chủ có HTTPS
 
@@ -123,31 +123,46 @@ Với Streamlit Community Cloud:
    ```
 
    Không lưu mật khẩu này trong mã nguồn hoặc commit `secrets.toml`. App sẽ không khởi chạy nếu chưa cấu hình mật khẩu.
-4. Bấm **Deploy** và đợi dịch vụ cấp URL HTTPS. Mở URL trên điện thoại, đăng nhập, vào **Giám sát trực tiếp > Camera trực tiếp (tự động)**, chọn hướng camera và bấm **START**.
+4. Bấm **Deploy** và đợi dịch vụ cấp URL HTTPS. Mở URL trên điện thoại, đăng nhập, vào **Giám sát trực tiếp > Camera trực tiếp (tự động)**, chọn hướng camera và bấm **Bật camera**.
 
-Trong triển khai này, file trọng số `models/plate_detector_yolov8n.pt` được giữ lại để detector YOLO hoạt động; thư mục dữ liệu huấn luyện và checkpoint phụ không được đưa lên. Các mô hình AI chỉ được khởi tạo sau khi nhấn **START** để trang giám sát không phải tải chúng ngay khi mở. Nếu repository không thể chứa trọng số, tải nó lên nơi lưu trữ phù hợp và cấu hình bước tải trọng số trước khi chạy app.
+Trong triển khai này, file trọng số `models/plate_detector_yolov8n.pt` được giữ lại để detector YOLO hoạt động; thư mục dữ liệu huấn luyện và checkpoint phụ không được đưa lên. Các mô hình AI chỉ được khởi tạo sau khi bật camera để trang giám sát không phải tải chúng ngay khi mở. Nếu repository không thể chứa trọng số, tải nó lên nơi lưu trữ phù hợp và cấu hình bước tải trọng số trước khi chạy app.
 
-**Lưu ý triển khai:** camera trực tiếp sử dụng WebRTC qua HTTPS từ chính thiết bị mở trang. Quyền camera cần được cấp trên trình duyệt; mạng bị chặn WebRTC/STUN có thể ngăn kết nối. Chọn hướng theo vị trí camera vì app không suy ra chiều xe chỉ từ một khung hình. Khung xanh phân biệt **CAR/MOTORCYCLE/BUS/TRUCK** (xe) và **BIEN SO** (biển số); mô hình YOLO COCO cho xe `yolov8n.pt` được tải tự động từ Ultralytics khi bật camera lần đầu, cần kết nối mạng. App chỉ lưu khi thấy xe thật cùng biển số; hai lần OCR phải đúng định dạng phổ biến và confidence từ 65%. Cùng biển số/hướng bị lọc trùng 25 giây. Màn hình đăng nhập dùng chung một mật khẩu; chỉ chia sẻ mật khẩu với người được phép truy cập. SQLite và ảnh bằng chứng được lưu trên ổ đĩa máy chủ; trên hosting có ổ đĩa tạm thời, dữ liệu có thể mất khi máy chủ khởi động lại hoặc triển khai lại. Không dùng làm hệ thống lưu hồ sơ lâu dài nếu chưa chuyển cơ sở dữ liệu/ảnh sang dịch vụ lưu trữ bền vững và có sao lưu.
+**Lưu ý triển khai:** camera trình duyệt cần HTTPS và quyền camera. Hình ảnh được gửi đến ứng dụng qua kết nối HTTPS/WebSocket hiện có, không dùng WebRTC, STUN hoặc TURN; máy chủ nhận khung hình khoảng mỗi 1,1 giây và xử lý nhận diện trên app. Điều này tốn băng thông và tài nguyên máy chủ hơn truyền video trực tiếp. Chọn hướng theo vị trí camera vì app không suy ra chiều xe chỉ từ một khung hình. Khung xanh phân biệt **CAR/MOTORCYCLE/BUS/TRUCK** (xe) và **BIEN SO** (biển số); mô hình YOLO COCO cho xe `yolov8n.pt` được tải tự động từ Ultralytics khi bật camera lần đầu, cần kết nối mạng. App chỉ lưu khi thấy xe thật cùng biển số; hai lần OCR phải đúng định dạng phổ biến và confidence từ 65%. Cùng biển số/hướng bị lọc trùng 25 giây. Màn hình đăng nhập dùng chung một mật khẩu; chỉ chia sẻ mật khẩu với người được phép truy cập.
 
-Nếu camera báo kết nối WebRTC lâu hoặc không có hình trên Streamlit Cloud, mạng hiện tại có thể chặn STUN/UDP. Tạo TURN credentials từ nhà cung cấp TURN tin cậy, rồi thêm các giá trị này vào **Streamlit Cloud > App settings > Secrets** (không đưa credentials vào Git):
+#### Lưu dữ liệu bền vững trên Streamlit Cloud (tùy chọn)
+
+SQLite và filesystem vẫn được dùng mặc định khi không cấu hình dịch vụ bên ngoài. Để dữ liệu không mất khi Cloud khởi động lại, thêm các Secrets sau tại **App settings > Secrets**. Không đưa secrets vào Git hoặc gửi qua chat:
 
 ```toml
-WEBRTC_TURN_URLS = ["turn:your-turn-server:3478?transport=tcp"]
-WEBRTC_TURN_USERNAME = "your-username"
-WEBRTC_TURN_CREDENTIAL = "your-secret-credential"
+APP_PASSWORD = "mat-khau-rieng-dai-it-nhat-12-ky-tu"
+DATABASE_URL = "PASTE_YOUR_PROVIDER_POSTGRES_CONNECTION_URI"
+
+S3_BUCKET = "ten-bucket"
+S3_ACCESS_KEY_ID = "access-key"
+S3_SECRET_ACCESS_KEY = "secret-key"
+S3_ENDPOINT_URL = "https://endpoint-cua-nha-cung-cap"
+S3_REGION = "auto"
+S3_ADDRESSING_STYLE = "path"
+S3_PREFIX = "license-plate-system"
 ```
 
-Khởi động lại app sau khi lưu secrets. TURN chuyển tiếp luồng video qua nhà cung cấp TURN, nên dùng nhà cung cấp được tin cậy và kiểm tra giới hạn/chi phí dữ liệu. Nếu chưa cấu hình TURN, thử mở app trên mạng khác hoặc hotspot điện thoại.
+`DATABASE_URL` bật PostgreSQL; app tự tạo/cập nhật các bảng khi khởi động. PostgreSQL cần cho phép kết nối SSL từ Streamlit Cloud. Để dùng AWS S3, có thể bỏ `S3_ENDPOINT_URL` và đặt region AWS phù hợp; với R2/MinIO hoặc dịch vụ tương thích S3, dùng endpoint, region và addressing style của nhà cung cấp. `S3_ENDPOINT_URL` và `S3_REGION` phụ thuộc dịch vụ. Cần cả ba giá trị bucket/access key/secret key; nếu chỉ cấu hình một phần app sẽ báo lỗi thay vì âm thầm quay về lưu local. App lưu ảnh bằng chứng, mẫu OCR và bản sao tệp tải lên vào bucket; ảnh được tải qua server app và bucket không cần public.
+
+Nếu cấu hình chỉ PostgreSQL, ảnh vẫn lưu local nên Cloud có thể làm mất ảnh sau khi khởi động lại. Nếu cấu hình chỉ S3, thông tin xe/lịch sử vẫn ở SQLite tạm thời. Để bền vững đầy đủ cần cấu hình cả PostgreSQL và object storage. Mỗi lần đổi `DATABASE_URL`/S3 credentials cần **Reboot app**.
+
+Để chuyển dữ liệu hiện có: trước khi cấu hình backend mới, tải ZIP tại **Cấu hình > Sao lưu và khôi phục**; cấu hình PostgreSQL/S3 rồi Reboot; tải ZIP đó lên cùng mục và khôi phục. Khôi phục sẽ thay toàn bộ dữ liệu database đích, đồng thời tải ảnh/file trong ZIP lên object storage nếu đã cấu hình. Tạo/tải backup hiện tại trước khi khôi phục. Sau đó dùng **Tạo bản sao lưu** định kỳ và lưu ZIP ở nơi riêng; backup chứa thông tin cá nhân, lịch sử và ảnh nên cần được bảo vệ. Các khóa S3 cần quyền list/get/put trong bucket/prefix đã cấu hình; thao tác rollback ảnh OCR cần quyền delete.
+
+Camera không cần cấu hình tài khoản TURN/STUN. Mở app bằng HTTPS, cho phép quyền camera của trình duyệt rồi bấm **Bật camera**. Nếu không mở được camera, kiểm tra quyền camera của trang/trình duyệt và thử tải lại app. Khi dùng tính năng ghép điện thoại với máy tính, hình ảnh đi qua máy chủ ứng dụng nên cả hai thiết bị phải truy cập cùng deployment đang hoạt động; luồng video không được lưu thành file.
 
 ## 7. Kiểm thử MVP
 
 ### 7.1. Giám sát trực tiếp và nhận diện
-- Vào **Giám sát trực tiếp**, chọn **Camera trực tiếp (tự động)**, chọn hướng **XE VÀO/XE RA**, bấm **START** và cấp quyền camera. Video được nhận diện liên tục từ webcam hoặc camera điện thoại của thiết bị đang mở trang.
+- Vào **Giám sát trực tiếp**, chọn **Camera trực tiếp (tự động)**, chọn hướng **XE VÀO/XE RA**, bấm **Bật camera** và cấp quyền camera. Ảnh từ webcam/camera điện thoại được gửi qua HTTPS khoảng mỗi 1,1 giây để nhận diện.
 - App xử lý nhận diện nền để video preview không phải chờ YOLO/OCR; kết quả mới nhất được dùng để vẽ khung xanh thân xe và biển số. App nhận diện gần mỗi 1 giây và tự lưu khi nhận được cả xe lẫn biển số, OCR đạt ngưỡng lọc; không cần xác nhận từng biển số. Với kết quả OCR rõ, app dừng sớm sau lượt nhận dạng đầu; nếu chưa rõ, app vẫn thử các ảnh tăng cường để giữ độ nhạy. Kiểm tra danh sách sự kiện tự động để rà lại kết quả vì OCR vẫn có thể đọc sai.
 - Luồng video giới hạn ở 960×540, tối đa 15 FPS; mô hình xe dùng ảnh suy luận 480 px và giới hạn 5 kết quả để giảm tải khi chạy CPU. Biển số được OCR trên vùng crop gốc để giữ chi tiết.
-- Để ghép điện thoại với máy tính, chọn **Liên kết camera từ xa** trên cả hai thiết bị. Trên điện thoại, chọn **Phát camera từ điện thoại**, tạo mã rồi bấm **START**; trên máy tính, chọn **Xem camera trên máy tính**, nhập mã và bấm **Kết nối camera/START**. Mã ghép có hiệu lực 30 phút; khởi động lại ứng dụng sẽ ngắt liên kết và cần tạo mã mới. Luồng hình ảnh được chuyển tiếp trong bộ nhớ tiến trình ứng dụng, không lưu thành video.
-- Camera trực tiếp cần HTTPS và kết nối WebRTC; firewall/mạng chặn STUN có thể ngăn truyền video.
-- Nếu camera không mở, kiểm tra quyền camera của trình duyệt/Windows tại **Settings > Privacy & security > Camera**, rồi thử tải lại trang và bấm START lần nữa.
+- Để ghép điện thoại với máy tính, chọn **Liên kết camera từ xa** trên cả hai thiết bị. Trên điện thoại, chọn **Phát camera từ điện thoại**, tạo mã rồi bấm **Bật camera**; trên máy tính, chọn **Xem camera trên máy tính** và nhập mã. Mã ghép có hiệu lực 30 phút; khởi động lại ứng dụng sẽ ngắt liên kết và cần tạo mã mới. Khung hình được chuyển tiếp trong bộ nhớ tiến trình ứng dụng, không lưu thành video.
+- Camera trực tiếp cần HTTPS và kết nối WebSocket tới ứng dụng; không cần mở kết nối STUN/TURN riêng.
+- Nếu camera không mở, kiểm tra quyền camera của trình duyệt/Windows tại **Settings > Privacy & security > Camera**, rồi tải lại trang và bấm **Bật camera** lần nữa.
 - Có thể chọn **Ảnh/video (thủ công)** nếu cần quét riêng tệp; đây là luồng riêng, không thay cho camera trực tiếp.
 - Với video, thanh trượt chỉ nhận diện khung hình đang chọn. Để tìm nhiều biển số trong clip, bấm **Quét tìm biển số trong toàn video**; ứng dụng lấy mẫu tối đa 2 khung hình/giây (không quá 300 khung hình), gộp kết quả trùng nhau rồi yêu cầu kiểm tra từng biển số, chọn hướng và xác nhận trước khi lưu. Video dài hoặc biển số nhỏ/mờ có thể cần thử một khung hình khác.
 - OCR thử ảnh màu, grayscale và tăng tương phản; nếu crop nhỏ hơn khoảng 80×32 px, hãy chọn khung rõ hơn hoặc đưa camera lại gần/lấy nét. Phóng lớn bằng phần mềm không thể khôi phục chi tiết không có trong ảnh; confidence của detector cũng không xác nhận rằng khung đó thực sự chứa biển số.
@@ -184,9 +199,10 @@ Khởi động lại app sau khi lưu secrets. TURN chuyển tiếp luồng vide
 
 ### 7.6. Ghi chú huấn luyện và đánh giá mô hình
 
-- Giao diện hiện chỉ giữ năm mục vận hành: **Giám sát trực tiếp**, **Lịch sử ra vào**, **Quản lý xe**, **Báo cáo**, **Cấu hình**. Huấn luyện/evaluate AI không còn là mục điều hướng trong app.
+- Giao diện có mục **Huấn luyện model** để tải dataset ZIP và fine-tune YOLO trực tiếp trong app. Trên CPU/Streamlit Cloud, bắt đầu với vài epoch vì lượt train dài có thể bị giới hạn tài nguyên hoặc bị ngắt khi app khởi động lại.
 - Để huấn luyện YOLO cần ảnh biển số **đã gán nhãn bounding box**, nhãn YOLO `.txt`, tách tập `train` và `val`, cùng file YAML dataset. Ảnh/video chưa gán nhãn không thể dùng để train detector.
-- `yolov8n.pt` có thể làm checkpoint khởi tạo khi fine-tune; bản pretrained COCO chưa phải detector biển số. Dùng lệnh huấn luyện từ CMD bên dưới; checkpoint khởi tạo không tự động ghi đè detector đang dùng.
+- `yolov8n.pt` có thể làm checkpoint khởi tạo khi fine-tune; bản pretrained COCO chưa phải detector biển số. Trang huấn luyện chỉ thay model đang dùng sau khi lượt train tạo được `best.pt`; có thể tải model về để giữ bản sao.
+- Dataset ZIP cần chứa đúng một `data.yaml`, `images/train`, `images/val`, `labels/train` và `labels/val`. App giới hạn ZIP tải lên 512 MB, tổng dung lượng giải nén 2 GB, kiểm tra đường dẫn an toàn và tự chỉnh `path` trong YAML.
 - Dataset tham khảo: [Vietnamese license plates trên Kaggle](https://www.kaggle.com/datasets/tanhphp/vietnamese-license-plates). Kiểm tra điều khoản/giấy phép và xem nội dung tải xuống; nếu không có nhãn YOLO, cần gán nhãn trước (ví dụ bằng CVAT/Roboflow) rồi export YOLO format.
 - Dataset Kaggle này đã được tải vào `datasets\vietnamese-license-plates`; metadata Kaggle ghi giấy phép Apache 2.0. Archive được xác minh có `train/val/test`; bản tải hiện tại có 2.036 ảnh train, 146 ảnh validation và 73 ảnh test. Ghi chú nguồn/kiểm tra nằm ở `datasets\vietnamese-license-plates\DATASET_SOURCE.md`.
 - Đã chạy một lượt pilot CPU để xác nhận pipeline: YOLOv8n, 3 epoch, 320 px, batch 4, fraction 5%. Checkpoint thử nghiệm ở `models\plate_detector_pilot.pt`, đồng thời hiện được cấu hình làm detector tại `models\plate_detector_yolov8n.pt`; kết quả test ở `runs\train\vietnamese_plates_cpu_pilot_3ep\test_metrics.json`. Đây chưa phải huấn luyện toàn bộ; xem phần ghi chú nguồn dữ liệu để biết các chỉ số và giới hạn.
@@ -224,19 +240,19 @@ Khởi động lại app sau khi lưu secrets. TURN chuyển tiếp luồng vide
     0: license_plate
   ```
 
-- Huấn luyện CPU từ CMD, tại thư mục dự án:
+- Có thể huấn luyện CPU từ CMD bằng helper mới, tại thư mục dự án:
 
   ```cmd
   .venv\Scripts\activate
-  yolo detect train model=yolov8n.pt data=datasets\plates\dataset.yaml epochs=30 imgsz=640 batch=4 device=cpu workers=0 project=runs\train name=plates
+  python train_plate_detector.py --data datasets\plates\dataset.yaml --epochs 5 --imgsz 416 --batch 4 --model yolov8n.pt
   ```
 
-  Chạy lệnh huấn luyện từ CMD trong môi trường `.venv`; điều chỉnh dataset, số epoch và kích thước ảnh trực tiếp trong lệnh. Huấn luyện toàn bộ dữ liệu trên CPU có thể mất nhiều thời gian.
+  Điều chỉnh dataset, số epoch và kích thước ảnh trực tiếp trong lệnh. Huấn luyện toàn bộ dữ liệu trên CPU có thể mất nhiều thời gian.
 
-- Trọng số tốt nhất từ CMD nằm tại `runs\train\plates\weights\best.pt`; chép thành `models\plate_detector_yolov8n.pt` để ứng dụng nhận detector mới:
+- Helper triển khai tự động chép best checkpoint vào `models\plate_detector_yolov8n.pt`. File gốc nằm dưới `runs\plate_detect\train\weights\best.pt`:
 
   ```cmd
-  copy runs\train\plates\weights\best.pt models\plate_detector_yolov8n.pt
+  copy runs\plate_detect\train\weights\best.pt models\plate_detector_yolov8n.pt
   ```
 
 - Đánh giá trên tập validation:
@@ -317,7 +333,7 @@ pip install easyocr
 
 - Mở trang bằng HTTPS khi truy cập từ máy chủ deploy; cấp quyền camera cho trình duyệt.
 - Khi chạy trong Wi-Fi nội bộ bằng HTTP, một số trình duyệt/thiết bị có thể không cho truy cập camera. Dùng URL HTTPS.
-- Camera trực tiếp dùng camera của thiết bị đang mở trang và cần WebRTC; camera không phải thiết bị gắn với máy chủ.
+- Camera trực tiếp dùng camera của thiết bị đang mở trang và gửi ảnh qua HTTPS; camera không phải thiết bị gắn với máy chủ. Ảnh truyền khoảng mỗi 1,1 giây thay vì video FPS cao để giới hạn băng thông và tải xử lý.
 
 ## 11. Ghi chú về khả năng triển khai thực tế
 

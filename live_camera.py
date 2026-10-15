@@ -8,13 +8,11 @@ from typing import Callable
 
 import cv2
 import numpy as np
-from av import VideoFrame
-from streamlit_webrtc import VideoProcessorBase
 
 from database import normalize_plate
 
 
-class AutomaticPlateProcessor(VideoProcessorBase):
+class AutomaticPlateProcessor:
     def __init__(
         self,
         detector,
@@ -261,16 +259,19 @@ class AutomaticPlateProcessor(VideoProcessorBase):
                 detections = list(self._last_detections)
                 vehicle_detections = list(self._last_vehicle_detections)
                 status = self._status
-            return self._annotate(frame, detections, vehicle_detections, status)
-
-        if current_time - self._last_scan_at >= self.scan_interval:
-            self._last_scan_at = current_time
-            self._scan_frame(frame, current_time)
-        with self._state_lock:
-            detections = list(self._last_detections)
-            vehicle_detections = list(self._last_vehicle_detections)
-            status = self._status
-        return self._annotate(frame, detections, vehicle_detections, status)
+            output = self._annotate(frame, detections, vehicle_detections, status)
+        else:
+            if current_time - self._last_scan_at >= self.scan_interval:
+                self._last_scan_at = current_time
+                self._scan_frame(frame, current_time)
+            with self._state_lock:
+                detections = list(self._last_detections)
+                vehicle_detections = list(self._last_vehicle_detections)
+                status = self._status
+            output = self._annotate(frame, detections, vehicle_detections, status)
+        if self.frame_publisher:
+            self.frame_publisher(output)
+        return output
 
     def _annotate(
         self,
@@ -307,10 +308,3 @@ class AutomaticPlateProcessor(VideoProcessorBase):
                 cv2.LINE_AA,
             )
         return output
-
-    def recv(self, frame: VideoFrame) -> VideoFrame:
-        image = frame.to_ndarray(format="bgr24")
-        processed = self.process(image)
-        if self.frame_publisher:
-            self.frame_publisher(processed)
-        return VideoFrame.from_ndarray(processed, format="bgr24")

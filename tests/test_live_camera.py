@@ -1,9 +1,7 @@
 import unittest
 import threading
 
-from av import VideoFrame
 import numpy as np
-from streamlit_webrtc import VideoProcessorBase
 
 from live_camera import AutomaticPlateProcessor
 
@@ -176,13 +174,25 @@ class AutomaticPlateProcessorTests(unittest.TestCase):
         processor._scan_thread.join(timeout=2)
         self.assertFalse(processor._scan_worker_running)
 
-    def test_implements_webrtc_video_processor_contract(self):
-        self.assertIsInstance(self.processor, VideoProcessorBase)
+    def test_processes_camera_frames_without_webrtc_dependency(self):
         self.assertEqual(self.processor.scan_interval, 1.0)
-        incoming = VideoFrame.from_ndarray(self.frame, format="bgr24")
-        outgoing = self.processor.recv(incoming)
-        self.assertIsInstance(outgoing, VideoFrame)
-        self.assertEqual(outgoing.to_ndarray(format="bgr24").shape, self.frame.shape)
+        outgoing = self.processor.process(self.frame, now=1.0)
+        self.assertEqual(outgoing.shape, self.frame.shape)
+
+    def test_publishes_processed_frames_to_remote_camera_relay(self):
+        published = []
+        processor = AutomaticPlateProcessor(
+            detector=FakeDetector(),
+            ocr_service=FakeOCR(),
+            direction="IN",
+            record_event=lambda *args: "saved",
+            frame_publisher=lambda frame: published.append(frame.copy()),
+        )
+
+        output = processor.process(self.frame, now=1.0)
+
+        self.assertEqual(len(published), 1)
+        np.testing.assert_array_equal(published[0], output)
 
 
 if __name__ == "__main__":

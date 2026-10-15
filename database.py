@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import sqlite3
 import uuid
 from datetime import datetime, timedelta
@@ -10,6 +11,130 @@ from typing import Any, Dict, List, Optional
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "license_plate.db"
+DATABASE_URL = ""
+
+
+class PostgresConnection:
+    def __init__(self, connection):
+        self._connection = connection
+
+    def execute(self, sql: str, parameters=()):
+        pragma_match = re.fullmatch(r"\s*PRAGMA\s+table_info\((\w+)\)\s*", sql, re.IGNORECASE)
+        if pragma_match:
+            table_name = pragma_match.group(1)
+            cursor = self._connection.execute(
+                """
+                SELECT column_name AS name, data_type AS type,
+                       CASE WHEN is_nullable = 'NO' THEN 1 ELSE 0 END AS notnull,
+                       column_default AS dflt_value,
+                       CASE WHEN column_name = (
+                           SELECT kcu.column_name
+                           FROM information_schema.table_constraints tc
+                           JOIN information_schema.key_column_usage kcu
+                             ON tc.constraint_name = kcu.constraint_name
+                            AND tc.table_schema = kcu.table_schema
+                           WHERE tc.constraint_type = 'PRIMARY KEY'
+                             AND tc.table_schema = current_schema()
+                             AND tc.table_name = %s
+                           LIMIT 1
+                       ) THEN 1 ELSE 0 END AS pk
+                FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = %s
+                ORDER BY ordinal_position
+                """,
+                (table_name, table_name),
+            )
+            return PostgresCursor(cursor)
+
+        rewritten = re.sub(r"datetime\(([\w.]+)\)", r"\1", sql)
+        rewritten = rewritten.replace(
+            "date(event_time) = date(?)",
+            "substring(event_time, 1, 10) = ?",
+        )
+        rewritten = rewritten.replace(
+            "date(event_time) BETWEEN date(?) AND date(?)",
+            "substring(event_time, 1, 10) BETWEEN ? AND ?",
+        )
+        rewritten = rewritten.replace("time(event_time) >= time(?)", "substring(event_time, 12, 8) >= ?")
+        rewritten = rewritten.replace("time(event_time) <= time(?)", "substring(event_time, 12, 8) <= ?")
+        rewritten = re.sub(
+            r"INTEGER PRIMARY KEY AUTOINCREMENT",
+            "BIGSERIAL PRIMARY KEY",
+            rewritten,
+            flags=re.IGNORECASE,
+        )
+        rewritten = re.sub(
+            r"(TEXT(?: NOT NULL)? DEFAULT) CURRENT_TIMESTAMP",
+            r"\1 CURRENT_TIMESTAMP::timestamp(0)::text",
+            rewritten,
+            flags=re.IGNORECASE,
+        )
+        rewritten = re.sub(
+            r"=\s*CURRENT_TIMESTAMP(?!::timestamp)",
+            "= CURRENT_TIMESTAMP::timestamp(0)::text",
+            rewritten,
+            flags=re.IGNORECASE,
+        )
+        rewritten = rewritten.replace("?", "%s")
+        wants_id = bool(
+            re.match(
+                r"\s*INSERT\s+INTO\s+(vehicles|access_events|ocr_samples)\b",
+                rewritten,
+                re.IGNORECASE,
+            )
+        )
+        if wants_id and " returning " not in rewritten.lower():
+            rewritten = rewritten.rstrip().rstrip(";") + " RETURNING id"
+        try:
+            cursor = self._connection.execute(rewritten, parameters)
+        except Exception as exc:
+            self._raise_database_error(exc)
+            raise
+        lastrowid = None
+        if wants_id:
+            row = cursor.fetchone()
+            lastrowid = row["id"] if row else None
+        return PostgresCursor(cursor, lastrowid)
+
+    def commit(self):
+        try:
+            self._connection.commit()
+        except Exception as exc:
+            self._raise_database_error(exc)
+            raise
+
+    def close(self):
+        self._connection.close()
+
+    @staticmethod
+    def _raise_database_error(exc):
+        try:
+            import psycopg
+        except ImportError:
+            return
+        if isinstance(exc, psycopg.Error):
+            raise sqlite3.OperationalError(str(exc)) from exc
+
+
+class PostgresCursor:
+    def __init__(self, cursor, lastrowid=None):
+        self._cursor = cursor
+        self.lastrowid = lastrowid
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+
+def configure_database(database_url: str = "") -> None:
+    global DATABASE_URL
+    DATABASE_URL = database_url.strip()
+
+
+def database_backend_configured() -> bool:
+    return bool(DATABASE_URL)
 
 
 def normalize_plate(value: str) -> str:
@@ -19,7 +144,21 @@ def normalize_plate(value: str) -> str:
     return cleaned[:15]
 
 
-def get_connection() -> sqlite3.Connection:
+def get_connection():
+    if DATABASE_URL:
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:
+            raise RuntimeError(
+                "PostgreSQL đã được cấu hình nhưng thiếu gói psycopg. "
+                "Cài dependencies từ requirements.txt rồi khởi động lại."
+            ) from exc
+        try:
+            connection = psycopg.connect(DATABASE_URL, row_factory=dict_row)
+        except psycopg.Error as exc:
+            raise sqlite3.OperationalError(str(exc)) from exc
+        return PostgresConnection(connection)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
@@ -537,6 +676,36 @@ def list_ocr_samples(limit: int = 500) -> List[Dict[str, Any]]:
 def backup_database(output_path: str) -> str:
     target = Path(output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
+    if DATABASE_URL:
+        source = get_connection()
+        backup = sqlite3.connect(target)
+        try:
+            for table in ("vehicles", "access_events", "settings", "audit_logs", "ocr_samples"):
+                columns = source.execute(f"PRAGMA table_info({table})").fetchall()
+                if not columns:
+                    continue
+                definitions = []
+                for column in columns:
+                    data_type = str(column["type"]).lower()
+                    sqlite_type = "REAL" if data_type in {"real", "double precision", "numeric"} else (
+                        "INTEGER" if data_type in {"integer", "bigint", "smallint"} else "TEXT"
+                    )
+                    primary = " PRIMARY KEY" if column["pk"] else ""
+                    definitions.append(f'"{column["name"]}" {sqlite_type}{primary}')
+                backup.execute(f'CREATE TABLE "{table}" ({", ".join(definitions)})')
+                rows = source.execute(f'SELECT * FROM "{table}"').fetchall()
+                names = [column["name"] for column in columns]
+                quoted_names = ", ".join(f'"{name}"' for name in names)
+                placeholders = ", ".join("?" for _ in names)
+                backup.executemany(
+                    f'INSERT INTO "{table}" ({quoted_names}) VALUES ({placeholders})',
+                    [tuple(row[name] for name in names) for row in rows],
+                )
+            backup.commit()
+        finally:
+            backup.close()
+            source.close()
+        return str(target)
     source = get_connection()
     backup = sqlite3.connect(target)
     try:
@@ -571,17 +740,21 @@ def validate_database_backup(source_path: str) -> None:
         conn.close()
 
 
-def _remap_restored_image_paths(conn: sqlite3.Connection, evidence_root: Path) -> None:
+def _remap_restored_image_paths(conn, evidence_root: str | Path) -> None:
     for table in ("access_events", "ocr_samples"):
-        columns = {
-            row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
-        }
+        columns = set()
+        for column in conn.execute(f"PRAGMA table_info({table})").fetchall():
+            columns.add(column["name"] if hasattr(column, "keys") else column[1])
         if "image_path" not in columns:
             continue
         rows = conn.execute(
             f"SELECT id, image_path FROM {table} WHERE image_path IS NOT NULL AND image_path != ''"
         ).fetchall()
-        for row_id, image_path in rows:
+        for row in rows:
+            if hasattr(row, "keys"):
+                row_id, image_path = row["id"], row["image_path"]
+            else:
+                row_id, image_path = row[0], row[1]
             normalized = str(image_path).replace("\\", "/")
             marker = "/evidence/"
             if marker not in normalized.lower():
@@ -590,7 +763,14 @@ def _remap_restored_image_paths(conn: sqlite3.Connection, evidence_root: Path) -
             relative_parts = relative_path.split("/")
             if any(part in {"", ".", ".."} for part in relative_parts):
                 continue
-            target = evidence_root.joinpath(*relative_parts)
+            if isinstance(evidence_root, str) and evidence_root.startswith("s3://"):
+                target_path = f"{evidence_root.rstrip('/')}/{'/'.join(relative_parts)}"
+                conn.execute(
+                    f"UPDATE {table} SET image_path = ? WHERE id = ?",
+                    (target_path, row_id),
+                )
+                continue
+            target = Path(evidence_root).joinpath(*relative_parts)
             if target.is_file():
                 conn.execute(
                     f"UPDATE {table} SET image_path = ? WHERE id = ?",
@@ -598,8 +778,60 @@ def _remap_restored_image_paths(conn: sqlite3.Connection, evidence_root: Path) -
                 )
 
 
+def _restore_postgres_database(source_path: str, evidence_root: Optional[str]) -> str:
+    init_db()
+    source = sqlite3.connect(source_path)
+    source.row_factory = sqlite3.Row
+    target = get_connection()
+    tables = ("vehicles", "access_events", "settings", "audit_logs", "ocr_samples")
+    try:
+        source_tables = {
+            row[0] for row in source.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        for table in tables:
+            if table not in source_tables:
+                continue
+            target.execute(f'DELETE FROM "{table}"')
+            columns = [row["name"] for row in source.execute(f'PRAGMA table_info({table})').fetchall()]
+            if not columns:
+                continue
+            placeholders = ", ".join("?" for _ in columns)
+            column_sql = ", ".join(f'"{column}"' for column in columns)
+            rows = source.execute(f'SELECT * FROM "{table}"').fetchall()
+            for row in rows:
+                target.execute(
+                    f'INSERT INTO "{table}" ({column_sql}) VALUES ({placeholders})',
+                    tuple(row[column] for column in columns),
+                )
+            if "id" in columns:
+                target.execute(
+                    f"""
+                    SELECT setval(
+                        pg_get_serial_sequence(?, 'id'),
+                        COALESCE(MAX(id), 1),
+                        MAX(id) IS NOT NULL
+                    ) FROM "{table}"
+                    """,
+                    (table,),
+                )
+        if evidence_root:
+            _remap_restored_image_paths(target, evidence_root)
+        target.commit()
+    except Exception:
+        target._connection.rollback()
+        raise
+    finally:
+        source.close()
+        target.close()
+    return "PostgreSQL database"
+
+
 def restore_database(source_path: str, evidence_root: Optional[str] = None) -> str:
     validate_database_backup(source_path)
+    if DATABASE_URL:
+        return _restore_postgres_database(source_path, evidence_root)
     target = DB_PATH
     target.parent.mkdir(parents=True, exist_ok=True)
     staging_path = target.with_name(f".{target.name}.{uuid.uuid4().hex}.restore")
@@ -609,7 +841,7 @@ def restore_database(source_path: str, evidence_root: Optional[str] = None) -> s
         staging = sqlite3.connect(staging_path)
         source.backup(staging)
         if evidence_root:
-            _remap_restored_image_paths(staging, Path(evidence_root))
+            _remap_restored_image_paths(staging, evidence_root)
         staging.commit()
         integrity = staging.execute("PRAGMA integrity_check").fetchone()
         if integrity is None or integrity[0] != "ok":
