@@ -2478,69 +2478,128 @@ def render_vehicle_management() -> None:
 def render_history() -> None:
     st.subheader("Lịch sử ra vào")
     today = date.today()
-    date_range = st.date_input(
-        "Khoảng ngày",
-        value=(today - timedelta(days=30), today),
-        key="history_date_range",
-    )
-    filters = st.columns([1.3, 1, 1, 1])
-    with filters[0]:
-        plate_filter = st.text_input("Biển số", key="history_plate_filter")
-    with filters[1]:
-        direction_filter = st.selectbox(
-            "Hướng",
-            ["", "IN", "OUT"],
-            format_func=lambda value: "Tất cả" if not value else ("Xe vào" if value == "IN" else "Xe ra"),
-            key="history_direction_filter",
+    with st.form("history_search_form"):
+        date_range = st.date_input(
+            "Khoảng ngày",
+            value=(today - timedelta(days=30), today),
+            key="history_date_range",
         )
-    with filters[2]:
-        show_evidence = st.checkbox("Hiện ảnh minh chứng", key="history_show_evidence")
-    with filters[3]:
-        review_filter = st.selectbox(
-            "Xác minh",
-            ["", "confirmed", "needs_review"],
-            format_func=lambda value: "Tất cả" if not value else ("Đã xác minh" if value == "confirmed" else "Cần xác minh"),
-            key="history_review_filter",
+        filters = st.columns([1.3, 1, 1, 1])
+        with filters[0]:
+            plate_filter = st.text_input("Biển số", key="history_plate_filter")
+        with filters[1]:
+            direction_filter = st.selectbox(
+                "Hướng",
+                ["", "IN", "OUT"],
+                format_func=lambda value: "Tất cả" if not value else ("Xe vào" if value == "IN" else "Xe ra"),
+                key="history_direction_filter",
+            )
+        with filters[2]:
+            show_evidence = st.checkbox("Hiện ảnh minh chứng", key="history_show_evidence")
+        with filters[3]:
+            review_filter = st.selectbox(
+                "Xác minh",
+                ["", "confirmed", "needs_review"],
+                format_func=lambda value: "Tất cả" if not value else ("Đã xác minh" if value == "confirmed" else "Cần xác minh"),
+                key="history_review_filter",
+            )
+        time_filters = st.columns(2)
+        time_from = time_filters[0].time_input(
+            "Từ giờ",
+            value=datetime.strptime("00:00", "%H:%M").time(),
+            key="history_time_from",
         )
-    if not isinstance(date_range, tuple) or len(date_range) != 2:
-        st.info("Chọn đủ ngày bắt đầu và ngày kết thúc.")
-        return
-    date_from, date_to = date_range
-    if date_from > date_to:
-        st.error("Ngày bắt đầu phải nhỏ hơn hoặc bằng ngày kết thúc.")
-        return
+        time_to = time_filters[1].time_input(
+            "Đến giờ",
+            value=datetime.strptime("23:59", "%H:%M").time(),
+            key="history_time_to",
+        )
+        submitted = st.form_submit_button(
+            "Xác nhận và tra cứu",
+            type="primary",
+            use_container_width=True,
+        )
 
-    time_filters = st.columns(2)
-    time_from = time_filters[0].time_input("Từ giờ", value=datetime.strptime("00:00", "%H:%M").time())
-    time_to = time_filters[1].time_input("Đến giờ", value=datetime.strptime("23:59", "%H:%M").time())
-    if time_from > time_to:
-        st.error("Giờ bắt đầu phải nhỏ hơn hoặc bằng giờ kết thúc.")
-        return
-    events = list_events_range(
-        date_from.isoformat(),
-        date_to.isoformat(),
-        plate_filter,
-        direction_filter,
-        time_from.strftime("%H:%M:%S"),
-        time_to.strftime("%H:%M:%S"),
-        review_filter,
-    )
-    if not events:
-        st.info("Không có lịch sử phù hợp.")
-    else:
-        st.dataframe(pd.DataFrame(events), use_container_width=True, hide_index=True)
-        if show_evidence:
-            with st.expander("Ảnh minh chứng trong kết quả"):
-                for event in events:
-                    image_path = event.get("image_path")
-                    if image_exists(image_path):
-                        st.image(
-                            image_content(image_path),
-                            caption=f"{event['plate_number']} · {'Xe vào' if event['direction'] == 'IN' else 'Xe ra'} · {event['event_time']}",
-                            width=480,
-                        )
-                    elif image_path:
-                        st.warning(f"Không tìm thấy ảnh minh chứng: {image_path}")
+    if submitted:
+        if not isinstance(date_range, tuple) or len(date_range) != 2:
+            st.session_state.pop("history_search_result", None)
+            st.error("Vui lòng chọn đủ ngày bắt đầu và ngày kết thúc.")
+        elif date_range[0] > date_range[1]:
+            st.session_state.pop("history_search_result", None)
+            st.error("Ngày bắt đầu phải nhỏ hơn hoặc bằng ngày kết thúc.")
+        elif time_from > time_to:
+            st.session_state.pop("history_search_result", None)
+            st.error("Giờ bắt đầu phải nhỏ hơn hoặc bằng giờ kết thúc.")
+        else:
+            date_from, date_to = date_range
+            events = list_events_range(
+                date_from.isoformat(),
+                date_to.isoformat(),
+                plate_filter,
+                direction_filter,
+                time_from.strftime("%H:%M:%S"),
+                time_to.strftime("%H:%M:%S"),
+                review_filter,
+            )
+            plate = normalize_plate(plate_filter)
+            st.session_state["history_search_result"] = {
+                "events": events,
+                "plate": plate,
+                "show_evidence": show_evidence,
+            }
+
+    search_result = st.session_state.get("history_search_result")
+    if search_result:
+        events = search_result["events"]
+        plate = search_result["plate"]
+        if plate:
+            latest_event = get_latest_confirmed_event(plate)
+            vehicle = get_vehicle_by_plate(plate)
+            st.markdown("### Thông tin xe")
+            if latest_event:
+                current_location = (
+                    "Xe đang ở trong khu vực"
+                    if latest_event["direction"] == "IN"
+                    else "Xe đã ra khỏi khu vực"
+                )
+                st.success(
+                    f"Biển số {plate} · {current_location} · "
+                    f"Lần gần nhất: {'Xe vào' if latest_event['direction'] == 'IN' else 'Xe ra'} "
+                    f"lúc {latest_event['event_time']}."
+                )
+            else:
+                st.info(f"Chưa có lượt xe vào/ra đã xác nhận cho biển số {plate}.")
+            if vehicle:
+                vehicle_columns = st.columns(3)
+                vehicle_columns[0].markdown(
+                    f"**Chủ xe:** {vehicle.get('owner_name') or 'Chưa cập nhật'}"
+                )
+                vehicle_columns[1].markdown(
+                    f"**Loại xe:** {vehicle.get('vehicle_type') or 'Chưa cập nhật'}"
+                )
+                vehicle_columns[2].markdown(
+                    f"**Đăng ký:** {'Đã đăng ký' if vehicle.get('is_registered') else 'Chưa đăng ký'}"
+                )
+            else:
+                st.caption("Biển số này chưa có hồ sơ phương tiện.")
+
+        if not events:
+            st.info("Không có lịch sử phù hợp với thông tin đã xác nhận.")
+        else:
+            st.success(f"Tìm thấy {len(events)} lượt xe phù hợp.")
+            st.dataframe(pd.DataFrame(events), use_container_width=True, hide_index=True)
+            if search_result["show_evidence"]:
+                with st.expander("Ảnh minh chứng trong kết quả"):
+                    for event in events:
+                        image_path = event.get("image_path")
+                        if image_exists(image_path):
+                            st.image(
+                                image_content(image_path),
+                                caption=f"{event['plate_number']} · {'Xe vào' if event['direction'] == 'IN' else 'Xe ra'} · {event['event_time']}",
+                                width=480,
+                            )
+                        elif image_path:
+                            st.warning(f"Không tìm thấy ảnh minh chứng: {image_path}")
 
     review_queue = list_attention_events()
     unresolved = [event for event in review_queue if event.get("status") != "confirmed"]
