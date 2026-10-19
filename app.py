@@ -115,6 +115,13 @@ def decode_browser_camera_frame(payload: dict) -> np.ndarray:
     return frame
 
 
+def select_crop_for_display(
+    current_crop: np.ndarray | None,
+    fallback_crop: np.ndarray | None,
+) -> np.ndarray | None:
+    return current_crop if current_crop is not None else fallback_crop
+
+
 def format_plate_display(plate: str) -> str:
     cleaned = normalize_plate(plate)
     if not cleaned:
@@ -1436,7 +1443,10 @@ def render_overview() -> None:
             """,
             unsafe_allow_html=True,
         )
-        crop_to_show = current_crop or st.session_state.get(f"browser_camera_last_crop_{camera_key}")
+        crop_to_show = select_crop_for_display(
+            current_crop,
+            st.session_state.get(f"browser_camera_last_crop_{camera_key}"),
+        )
         if crop_to_show is not None and getattr(crop_to_show, "size", 0) > 0:
             crop_h, crop_w = crop_to_show.shape[:2]
             scale = min(8.0, max(2.0, 220.0 / max(1, crop_h)))

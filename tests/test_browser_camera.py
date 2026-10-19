@@ -9,6 +9,13 @@ import app
 
 
 class BrowserCameraFrameTests(unittest.TestCase):
+    def test_selects_crop_without_evaluating_numpy_array_truthiness(self):
+        current_crop = np.ones((20, 60, 3), dtype=np.uint8)
+        fallback_crop = np.zeros((10, 30, 3), dtype=np.uint8)
+
+        self.assertIs(app.select_crop_for_display(current_crop, fallback_crop), current_crop)
+        self.assertIs(app.select_crop_for_display(None, fallback_crop), fallback_crop)
+
     def test_decodes_valid_jpeg_frame(self):
         expected = np.full((24, 48, 3), (20, 90, 180), dtype=np.uint8)
         success, encoded = cv2.imencode(".jpg", expected)
