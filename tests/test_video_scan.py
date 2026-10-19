@@ -48,9 +48,11 @@ class FakeVideoCapture:
 class FakeDetector:
     def __init__(self):
         self.detected_shapes = []
+        self.detected_image_sizes = []
 
-    def detect(self, frame):
+    def detect(self, frame, imgsz=640):
         self.detected_shapes.append(frame.shape)
+        self.detected_image_sizes.append(imgsz)
         return [{"box": True}]
 
     def crop_plate(self, frame, detection):
@@ -99,13 +101,14 @@ class VideoScanTests(unittest.TestCase):
         self.assertTrue(capture.released)
         self.assertEqual(capture.grab_calls, 392)
         self.assertEqual(detector.detected_shapes, [(80, 160, 3)] * 28)
+        self.assertEqual(detector.detected_image_sizes, [app.VIDEO_SCAN_IMAGE_SIZE] * 28)
         self.assertEqual(progress[-1], (28, 28))
         self.assertTrue(all(isinstance(item["frame_jpeg"], bytes) for item in results))
         self.assertTrue(all(isinstance(item["plate_jpeg"], bytes) for item in results))
         decoded = app.decode_video_scan_preview(results[0]["frame_jpeg"])
         self.assertEqual(decoded.shape, (80, 160, 3))
         decoded_plate = app.decode_video_scan_preview(results[0]["plate_jpeg"])
-        self.assertEqual(decoded_plate.shape, (80, 160, 3))
+        self.assertGreater(decoded_plate.shape[0], decoded.shape[0])
 
     def test_scan_preview_resizes_large_frames(self):
         frame = np.zeros((1920, 2560, 3), dtype=np.uint8)

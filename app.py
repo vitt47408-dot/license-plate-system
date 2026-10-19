@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import base64
+from concurrent.futures import Future, ThreadPoolExecutor
 import io
 import re
 import shutil
@@ -83,6 +84,8 @@ MODEL_DIR = BASE_DIR / "models"
 MAX_BACKUP_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_VIDEO_SCAN_RESULTS = 25
 MAX_VIDEO_SCAN_PREVIEW_SIZE = 1280
+VIDEO_SCAN_IMAGE_SIZE = 640
+VIDEO_SCAN_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="plate-video-scan")
 
 PAGE_DETAILS = {
     "Giám sát trực tiếp": ("Giám sát trực tiếp", "Camera, nhận diện biển số và xác nhận sự kiện tại cổng."),
@@ -843,7 +846,7 @@ def decode_video_scan_preview(image_bytes: bytes) -> np.ndarray:
 
 def detect_video_frame(detector: PlateDetector, frame: np.ndarray) -> list[dict]:
     try:
-        return detector.detect(frame, imgsz=416)
+        return detector.detect(frame, imgsz=VIDEO_SCAN_IMAGE_SIZE)
     except TypeError as exc:
         if "unexpected keyword argument" not in str(exc) or "imgsz" not in str(exc):
             raise
@@ -911,7 +914,9 @@ def scan_video_for_plates(
                         "plate_like": plate_like,
                         "frame_number": frame_number,
                         "frame_jpeg": encode_video_scan_preview(scan_frame),
-                        "plate_jpeg": encode_video_scan_preview(crop),
+                        "plate_jpeg": encode_video_scan_preview(
+                            enlarge_plate_crop(crop, target_height=220)
+                        ),
                         "rank": rank,
                     }
 
@@ -928,6 +933,53 @@ def scan_video_for_plates(
 
     results = sorted(found.values(), key=lambda item: item["rank"], reverse=True)
     return results, results_truncated
+
+
+def start_video_plate_scan(video_path: str, signature: str) -> dict:
+    job = {"signature": signature, "progress": (0, 0)}
+
+    def update_progress(current: int, total: int) -> None:
+        job["progress"] = (current, total)
+
+    job["future"] = VIDEO_SCAN_EXECUTOR.submit(
+        scan_video_for_plates,
+        video_path,
+        update_progress,
+    )
+    return job
+
+
+@st.fragment(run_every=1)
+def render_video_plate_scan_progress(signature: str) -> None:
+    job = st.session_state.get("dashboard_video_scan_job")
+    if not job or job.get("signature") != signature:
+        return
+
+    future: Future = job["future"]
+    if future.done():
+        try:
+            results, truncated = future.result()
+        except (cv2.error, MemoryError, OSError, RuntimeError, ValueError) as exc:
+            st.session_state.pop("dashboard_video_scan_job", None)
+            st.error(f"Không phân tích được video: {exc}")
+            return
+        st.session_state["dashboard_video_scan"] = {
+            "signature": signature,
+            "results": results,
+            "truncated": truncated,
+        }
+        st.session_state.pop("dashboard_video_scan_job", None)
+        st.session_state.pop("dashboard_video_scan_message", None)
+        st.rerun()
+
+    current, total = job["progress"]
+    if total:
+        st.progress(
+            min(1.0, current / total),
+            text=f"AI đang phân tích {current}/{total} khung hình...",
+        )
+    else:
+        st.progress(0, text="AI đang chuẩn bị phân tích video...")
 
 
 def capture_local_camera(camera_index: int) -> np.ndarray:
@@ -1268,7 +1320,7 @@ def render_overview() -> None:
         unsafe_allow_html=True,
     )
 
-    input_column, history_column, detail_column = st.columns([0.96, 1.06, 0.86], gap="medium")
+    input_column, history_column, detail_column = st.columns([1.3, 1.0, 0.85], gap="medium")
     recent_events = get_recent_events(12)
     vehicles = list_vehicles()
     vehicle_by_plate = {vehicle["plate_number"]: vehicle for vehicle in vehicles}
@@ -1392,31 +1444,30 @@ def render_overview() -> None:
                 video_bytes = analysis_video.getvalue()
                 dedicated_video_hash = hashlib.sha256(video_bytes).hexdigest()
                 video_path = save_uploaded_file(analysis_video)
+                st.video(video_bytes, autoplay=True, muted=True, width="stretch")
                 if st.button(
-                    "Phân tích và liệt kê biển số trong video",
+                    "Phát video và phân tích biển số",
                     key=f"analyze_uploaded_video_{dedicated_video_hash}",
                     type="primary",
                     use_container_width=True,
                 ):
-                    progress = st.progress(0, text="Đang phân tích video...")
-                    try:
-                        scan_results, scan_results_truncated = scan_video_for_plates(
+                    existing_job = st.session_state.get("dashboard_video_scan_job")
+                    if (
+                        not existing_job
+                        or existing_job.get("signature") != dedicated_video_hash
+                        or existing_job["future"].done()
+                    ):
+                        st.session_state["dashboard_video_scan_job"] = start_video_plate_scan(
                             video_path,
-                            lambda current, total: progress.progress(
-                                current / total,
-                                text=f"Đang phân tích khung hình {current}/{total}...",
-                            ),
+                            dedicated_video_hash,
                         )
-                        st.session_state["dashboard_video_scan"] = {
-                            "signature": dedicated_video_hash,
-                            "results": scan_results,
-                            "truncated": scan_results_truncated,
-                        }
+                        st.session_state.pop("dashboard_video_scan", None)
                         st.session_state.pop("dashboard_video_scan_message", None)
-                    except (cv2.error, MemoryError, OSError, RuntimeError, ValueError) as exc:
-                        st.error(f"Không phân tích được video: {exc}")
-                    finally:
-                        progress.empty()
+                if (
+                    (job := st.session_state.get("dashboard_video_scan_job"))
+                    and job.get("signature") == dedicated_video_hash
+                ):
+                    render_video_plate_scan_progress(dedicated_video_hash)
             except (OSError, ValueError) as exc:
                 st.error(f"Không thể tải video để phân tích: {exc}")
 
@@ -1778,7 +1829,7 @@ def render_overview() -> None:
         st.subheader("Kết quả quét toàn bộ video")
         st.caption(
             "Ứng dụng lấy mẫu video tối đa 2 khung hình/giây (tối đa 300 khung hình), "
-            f"chạy detector ở 416 px, gộp kết quả trùng và giữ tối đa "
+            f"chạy detector ở {VIDEO_SCAN_IMAGE_SIZE} px, gộp kết quả trùng và giữ tối đa "
             f"{MAX_VIDEO_SCAN_RESULTS} ảnh xem trước đã nén. Chỉ hiển thị OCR có định dạng "
             "giống biển số; vẫn cần kiểm tra ký tự, nhất là khi confidence thấp."
         )
