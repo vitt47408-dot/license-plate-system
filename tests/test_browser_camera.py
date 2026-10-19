@@ -16,6 +16,15 @@ class BrowserCameraFrameTests(unittest.TestCase):
         self.assertIs(app.select_crop_for_display(current_crop, fallback_crop), current_crop)
         self.assertIs(app.select_crop_for_display(None, fallback_crop), fallback_crop)
 
+    def test_enlarges_each_plate_crop_for_readable_preview(self):
+        crop = np.ones((40, 120, 3), dtype=np.uint8)
+
+        enlarged = app.enlarge_plate_crop(crop)
+
+        self.assertGreater(enlarged.shape[0], crop.shape[0])
+        self.assertGreater(enlarged.shape[1], crop.shape[1])
+        self.assertEqual(enlarged.shape[2], 3)
+
     def test_decodes_valid_jpeg_frame(self):
         expected = np.full((24, 48, 3), (20, 90, 180), dtype=np.uint8)
         success, encoded = cv2.imencode(".jpg", expected)

@@ -122,6 +122,18 @@ def select_crop_for_display(
     return current_crop if current_crop is not None else fallback_crop
 
 
+def enlarge_plate_crop(crop: np.ndarray, target_height: int = 220) -> np.ndarray:
+    crop_height = crop.shape[0]
+    scale = min(8.0, max(2.0, target_height / max(1, crop_height)))
+    return cv2.resize(
+        crop,
+        None,
+        fx=scale,
+        fy=scale,
+        interpolation=cv2.INTER_CUBIC,
+    )
+
+
 def format_plate_display(plate: str) -> str:
     cleaned = normalize_plate(plate)
     if not cleaned:
@@ -1447,16 +1459,32 @@ def render_overview() -> None:
             current_crop,
             st.session_state.get(f"browser_camera_last_crop_{camera_key}"),
         )
-        if crop_to_show is not None and getattr(crop_to_show, "size", 0) > 0:
-            crop_h, crop_w = crop_to_show.shape[:2]
-            scale = min(8.0, max(2.0, 220.0 / max(1, crop_h)))
-            zoom_crop = cv2.resize(
-                crop_to_show,
-                None,
-                fx=scale,
-                fy=scale,
-                interpolation=cv2.INTER_CUBIC,
+        if current_frame is not None and current_analysis and current_analysis["results"]:
+            st.caption(
+                f"Đã phóng to và phân tích {len(current_analysis['results'])} vùng biển số:"
             )
+            for index, result in enumerate(current_analysis["results"], start=1):
+                crop = result["crop"]
+                if crop is None or not crop.size:
+                    continue
+                zoom_crop = enlarge_plate_crop(crop)
+                plate_text = result["text"].strip() or "Chưa đọc được"
+                format_status = (
+                    "Đúng định dạng"
+                    if result["plate_like"]
+                    else "Cần kiểm tra ký tự"
+                )
+                with st.container(border=True):
+                    st.image(
+                        cv2.cvtColor(zoom_crop, cv2.COLOR_BGR2RGB),
+                        caption=(
+                            f"Biển số {index}: {plate_text} · "
+                            f"OCR {result['confidence']:.0%} · {format_status}"
+                        ),
+                        use_container_width=True,
+                    )
+        elif crop_to_show is not None and getattr(crop_to_show, "size", 0) > 0:
+            zoom_crop = enlarge_plate_crop(crop_to_show)
             st.image(
                 cv2.cvtColor(zoom_crop, cv2.COLOR_BGR2RGB),
                 use_container_width=True,
