@@ -154,6 +154,7 @@ Camera không cần cấu hình tài khoản TURN/STUN. Mở app bằng HTTPS, c
 - Camera trực tiếp cần HTTPS và kết nối WebSocket tới ứng dụng; không cần mở kết nối STUN/TURN riêng.
 - Nếu camera không mở, kiểm tra quyền camera của trình duyệt/Windows tại **Settings > Privacy & security > Camera**, rồi tải lại trang và bấm **Bật camera** lần nữa.
 - Có thể chọn **Ảnh/video (thủ công)** nếu cần quét riêng tệp; đây là luồng riêng, không thay cho camera trực tiếp.
+- Tại **Giám sát trực tiếp** cũng có ô **Tải video để liệt kê và phân tích biển số** độc lập; chọn MP4/AVI/MOV/MKV rồi bấm **Phân tích và liệt kê biển số trong video**. Mỗi kết quả hiển thị khung hình gốc, ảnh biển số phóng to, nội dung OCR và độ tin cậy để kiểm tra trước khi xác nhận.
 - Với video, thanh trượt chỉ nhận diện khung hình đang chọn. Để tìm nhiều biển số trong clip, bấm **Quét tìm biển số trong toàn video**; ứng dụng lấy mẫu tối đa 2 khung hình/giây (không quá 300 khung hình), gộp kết quả trùng nhau rồi yêu cầu kiểm tra từng biển số, chọn hướng và xác nhận trước khi lưu. Video dài hoặc biển số nhỏ/mờ có thể cần thử một khung hình khác.
 - OCR thử ảnh màu, grayscale và tăng tương phản; nếu crop nhỏ hơn khoảng 80×32 px, hãy chọn khung rõ hơn hoặc đưa camera lại gần/lấy nét. Phóng lớn bằng phần mềm không thể khôi phục chi tiết không có trong ảnh; confidence của detector cũng không xác nhận rằng khung đó thực sự chứa biển số.
 - Hệ thống hiển thị:
@@ -167,6 +168,7 @@ Camera không cần cấu hình tài khoản TURN/STUN. Mở app bằng HTTPS, c
 ### 7.2. Tải video
 - Tải video MP4/AVI và chọn một khung hình để xem nhanh.
 - Bấm **Quét tìm biển số trong toàn video** để nhận diện nhiều biển số trên các khung hình được lấy mẫu; video được đọc tuần tự (không seek riêng từng mẫu), khung lớn được thu nhỏ và detector dùng ảnh 416 px để giảm thời gian CPU. Tối đa 25 kết quả OCR khác nhau được giữ làm ảnh xem trước. Nếu có nhiều hơn, app giữ kết quả có độ tin cậy cao nhất và thông báo đã giới hạn kết quả; kiểm tra/sửa từng biển số và chỉ xác nhận các xe cần ghi nhận.
+- Ô tải video độc lập cũng liệt kê kết quả OCR duy nhất và hiển thị ảnh crop phóng to cạnh khung hình đã phát hiện; hỗ trợ MP4, AVI, MOV và MKV.
 - Mỗi biển số khác nhau chỉ xuất hiện một lần trong danh sách quét; các lần đọc trùng được gộp lại. Quét không thay thế việc người vận hành xác minh hướng và nội dung biển số.
 
 ### 7.3. Lưu lịch sử xe vào/ra

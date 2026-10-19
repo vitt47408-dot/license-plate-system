@@ -101,8 +101,11 @@ class VideoScanTests(unittest.TestCase):
         self.assertEqual(detector.detected_shapes, [(80, 160, 3)] * 28)
         self.assertEqual(progress[-1], (28, 28))
         self.assertTrue(all(isinstance(item["frame_jpeg"], bytes) for item in results))
+        self.assertTrue(all(isinstance(item["plate_jpeg"], bytes) for item in results))
         decoded = app.decode_video_scan_preview(results[0]["frame_jpeg"])
         self.assertEqual(decoded.shape, (80, 160, 3))
+        decoded_plate = app.decode_video_scan_preview(results[0]["plate_jpeg"])
+        self.assertEqual(decoded_plate.shape, (80, 160, 3))
 
     def test_scan_preview_resizes_large_frames(self):
         frame = np.zeros((1920, 2560, 3), dtype=np.uint8)

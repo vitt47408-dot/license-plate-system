@@ -911,6 +911,7 @@ def scan_video_for_plates(
                         "plate_like": plate_like,
                         "frame_number": frame_number,
                         "frame_jpeg": encode_video_scan_preview(scan_frame),
+                        "plate_jpeg": encode_video_scan_preview(crop),
                         "rank": rank,
                     }
 
@@ -1273,6 +1274,7 @@ def render_overview() -> None:
     vehicle_by_plate = {vehicle["plate_number"]: vehicle for vehicle in vehicles}
 
     upload_hash = ""
+    dedicated_video_hash = ""
     with input_column:
         st.markdown(
             """
@@ -1378,6 +1380,45 @@ def render_overview() -> None:
                         st.session_state.pop("dashboard_analysis", None)
                 except (cv2.error, OSError, ValueError) as exc:
                     st.error(f"Không đọc được tệp đầu vào: {exc}")
+
+        st.markdown("#### Tải video để liệt kê và phân tích biển số")
+        analysis_video = st.file_uploader(
+            "Chọn video MP4, AVI, MOV hoặc MKV",
+            type=["mp4", "avi", "mov", "mkv"],
+            key="plate_analysis_video_upload",
+        )
+        if analysis_video is not None:
+            try:
+                video_bytes = analysis_video.getvalue()
+                dedicated_video_hash = hashlib.sha256(video_bytes).hexdigest()
+                video_path = save_uploaded_file(analysis_video)
+                if st.button(
+                    "Phân tích và liệt kê biển số trong video",
+                    key=f"analyze_uploaded_video_{dedicated_video_hash}",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    progress = st.progress(0, text="Đang phân tích video...")
+                    try:
+                        scan_results, scan_results_truncated = scan_video_for_plates(
+                            video_path,
+                            lambda current, total: progress.progress(
+                                current / total,
+                                text=f"Đang phân tích khung hình {current}/{total}...",
+                            ),
+                        )
+                        st.session_state["dashboard_video_scan"] = {
+                            "signature": dedicated_video_hash,
+                            "results": scan_results,
+                            "truncated": scan_results_truncated,
+                        }
+                        st.session_state.pop("dashboard_video_scan_message", None)
+                    except (cv2.error, MemoryError, OSError, RuntimeError, ValueError) as exc:
+                        st.error(f"Không phân tích được video: {exc}")
+                    finally:
+                        progress.empty()
+            except (OSError, ValueError) as exc:
+                st.error(f"Không thể tải video để phân tích: {exc}")
 
     pending_capture = st.session_state.get("dashboard_capture_bytes")
     current_frame = None
@@ -1727,7 +1768,11 @@ def render_overview() -> None:
                 speak_vietnamese(f"Cảnh báo, từ chối xe {disp_plate}.")
 
     video_scan = st.session_state.get("dashboard_video_scan")
-    if video_scan and upload_hash and video_scan.get("signature") == upload_hash:
+    if (
+        video_scan
+        and video_scan.get("signature") in {upload_hash, dedicated_video_hash}
+        and video_scan.get("signature")
+    ):
         scan_results = video_scan.get("results", [])
         st.divider()
         st.subheader("Kết quả quét toàn bộ video")
@@ -1752,12 +1797,18 @@ def render_overview() -> None:
             with st.form(key=f"confirm_video_scan_{video_scan['signature']}"):
                 for index, item in enumerate(scan_results):
                     with st.container(border=True):
-                        preview_column, fields_column = st.columns([1, 1.5])
+                        preview_column, crop_column, fields_column = st.columns([1, 0.8, 1.5])
                         preview_column.image(
                             item["frame_jpeg"],
                             caption=f"Khung hình {item['frame_number']}",
                             use_container_width=True,
                         )
+                        if item.get("plate_jpeg"):
+                            crop_column.image(
+                                item["plate_jpeg"],
+                                caption="Ảnh biển số đã phóng to",
+                                use_container_width=True,
+                            )
                         with fields_column:
                             corrected_plate = st.text_input(
                                 f"Biển số {index + 1}",
