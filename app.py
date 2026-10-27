@@ -1786,6 +1786,28 @@ def render_overview() -> None:
             disp_plate = ""
             st.info("Chưa có sự kiện để hiển thị. Bật camera hoặc tải ảnh/video để bắt đầu.")
 
+        # Record Event Button & Action Buttons
+        dir_text_vn = "vào" if active_direction == "IN" else "ra"
+        is_already_saved = any(ev["plate_number"] == clean_plate and ev["direction"] == active_direction for ev in recent_events[:3])
+        save_btn_label = "✅ Đã ghi nhận lịch sử" if is_already_saved else f"💾 Xác nhận ghi nhận xe {dir_text_vn}"
+        if st.button(save_btn_label, key="btn_manual_record_event", type="secondary" if is_already_saved else "primary", use_container_width=True, disabled=not clean_plate or is_already_saved):
+            try:
+                frame_to_save = current_frame if current_frame is not None else (current_crop if current_crop is not None else np.zeros((100, 200, 3), dtype=np.uint8))
+                new_ev = process_confirmed_event(
+                    clean_plate,
+                    active_direction,
+                    frame_to_save,
+                    "manual_confirm" if current_frame is not None else "live_manual_confirm",
+                    active_conf,
+                )
+                log_audit("access_event_created", "access_event", str(new_ev["id"]), f"{clean_plate} direction={active_direction} manual_confirm=true")
+                st.toast(f"✅ ĐÃ LƯU VÀO LỊCH SỬ: {disp_plate} (XE {active_direction})!", icon="🎉")
+                st.rerun()
+            except ValueError as val_err:
+                st.warning(str(val_err))
+            except Exception as save_err:
+                st.error(f"Lỗi lưu sự kiện: {save_err}")
+
         # Action Buttons matching Desktop and Mobile Mockup
         btn_c1, btn_c2, btn_c3 = st.columns([1.15, 0.85, 1], gap="small")
         with btn_c1:
