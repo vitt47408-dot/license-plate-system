@@ -872,6 +872,7 @@ def scan_video_for_plates(
     sample_count = (frame_count + frame_stride - 1) // frame_stride
     detector = get_plate_detector()
     ocr_service = get_ocr_service()
+    vehicle_detector = get_vehicle_detector()
     if not ocr_service._loaded:
         cap.release()
         raise RuntimeError(
@@ -879,6 +880,8 @@ def scan_video_for_plates(
         )
 
     found: dict[str, dict] = {}
+    tracked_plates: dict[int, dict[str, object]] = {}
+    completed_tracks: set[int] = set()
     results_truncated = False
     frame_number = 0
     try:
@@ -888,14 +891,39 @@ def scan_video_for_plates(
                 break
 
             scan_frame = resize_video_scan_frame(frame)
+            vehicle_tracks: list[tuple[int, int, int, int, int, str]] = []
+            track_result = vehicle_detector.track(scan_frame, imgsz=640)
+            if track_result and track_result[0].boxes is not None and track_result[0].boxes.id is not None:
+                boxes = track_result[0].boxes
+                for track_id, coordinates, class_id in zip(
+                    boxes.id.cpu().numpy().astype(int).tolist(),
+                    boxes.xyxy.cpu().numpy().astype(int).tolist(),
+                    boxes.cls.cpu().numpy().astype(int).tolist(),
+                ):
+                    x1, y1, x2, y2 = coordinates
+                    vehicle_tracks.append((track_id, x1, y1, x2, y2, vehicle_detector.VEHICLE_CLASSES.get(class_id, "VEHICLE")))
+
             for detection in detect_video_frame(detector, scan_frame):
+                px1, py1 = int(detection["x1"]), int(detection["y1"])
+                px2, py2 = int(detection["x2"]), int(detection["y2"])
+                plate_cx, plate_cy = (px1 + px2) / 2, (py1 + py2) / 2
+                associated_track = next(
+                    (
+                        track_id
+                        for track_id, x1, y1, x2, y2, _vehicle_type in vehicle_tracks
+                        if x1 <= plate_cx <= x2 and y1 <= plate_cy <= y2
+                    ),
+                    None,
+                )
+                if associated_track is not None and associated_track in completed_tracks:
+                    continue
                 crop = detector.crop_plate(scan_frame, detection)
                 result = ocr_service.recognize(crop)
                 text = str(result.get("text") or "").strip()
                 plate = normalize_plate(text)
                 confidence = float(result.get("confidence") or 0)
                 plate_like = bool(result.get("plate_like"))
-                if len(plate) >= 5 and plate_like:
+                if len(plate) >= 6 and plate_like and confidence >= 0.55:
                     rank = (plate_like, confidence)
                     previous = found.get(plate)
                     if previous is not None and rank <= previous["rank"]:
@@ -916,6 +944,11 @@ def scan_video_for_plates(
                         "frame_jpeg": encode_video_scan_preview(scan_frame),
                         "plate_jpeg": encode_video_scan_preview(
                             enlarge_plate_crop(crop, target_height=220)
+                        ),
+                        "track_id": associated_track,
+                        "vehicle_type": (
+                            next((vehicle_type for track_id, _x1, _y1, _x2, _y2, vehicle_type in vehicle_tracks if track_id == associated_track), "")
+                            if associated_track is not None else ""
                         ),
                         "rank": rank,
                     }

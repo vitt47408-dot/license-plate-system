@@ -75,6 +75,24 @@ class VehicleDetector:
                 })
         return detections
 
+    def track(self, image: np.ndarray, imgsz: int = 640):
+        if self.model is None:
+            return None
+        try:
+            return self.model.track(
+                image,
+                imgsz=imgsz,
+                conf=0.25,
+                classes=list(self.VEHICLE_CLASSES),
+                persist=True,
+                tracker="bytetrack.yaml",
+                max_det=10,
+                verbose=False,
+            )
+        except (OSError, ValueError, RuntimeError) as exc:
+            self.model_error = str(exc)
+            return None
+
     def draw_boxes(self, image: np.ndarray, detections: List[dict]) -> np.ndarray:
         output = image.copy()
         for detection in detections:

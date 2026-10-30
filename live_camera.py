@@ -21,7 +21,7 @@ class AutomaticPlateProcessor:
         record_event: Callable[[str, str, np.ndarray, float], str],
         vehicle_detector=None,
         minimum_confidence: float = 0.55,
-        required_sightings: int = 1,
+        required_sightings: int = 2,
         scan_interval: float = 0.35,
         consensus_window: float = 6.0,
         model_loader: Callable[[], tuple[object, object, object]] | None = None,
@@ -201,7 +201,7 @@ class AutomaticPlateProcessor:
                 continue
             active_plates.add(plate)
             previous_count, previous_time = self._sightings.get(plate, (0, 0.0))
-            count = previous_count + 1 if current_time - previous_time <= self.consensus_window else 1
+            count = previous_count + 1 if current_time - previous_time < 5.0 else 1
             self._sightings[plate] = (count, current_time)
 
             required_sightings = (

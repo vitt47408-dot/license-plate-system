@@ -59,8 +59,11 @@ class OCRService:
         else:
             color = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
             gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
-        enhanced = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4)).apply(gray)
-        return [color, gray, enhanced]
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
+        enhanced = clahe.apply(gray)
+        denoised = cv2.fastNlMeansDenoising(enhanced, h=11, templateWindowSize=7, searchWindowSize=21)
+        _, otsu = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        return [color, cv2.cvtColor(enhanced, cv2.COLOR_GRAY2RGB), cv2.cvtColor(denoised, cv2.COLOR_GRAY2RGB)]
 
     def clean_text(self, text: str) -> str:
         cleaned = text.strip().upper()
@@ -146,7 +149,7 @@ class OCRService:
                     detail=1,
                     paragraph=False,
                     allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-                    mag_ratio=1.5,
+                    mag_ratio=1.25,
                     text_threshold=0.5,
                     low_text=0.25,
                 )
@@ -155,7 +158,7 @@ class OCRService:
                     plate_like = self._looks_like_vietnamese_plate(text)
                     score = confidence + (0.35 if plate_like else 0.0)
                     candidates.append((score, text, confidence, plate_like))
-                    if plate_like and confidence >= 0.65:
+                    if plate_like and confidence >= 0.55:
                         break
         except (OSError, RuntimeError, ValueError, TypeError, IndexError) as exc:  # pragma: no cover
             return {"text": "", "confidence": 0.0, "error": f"OCR thất bại: {exc}"}
