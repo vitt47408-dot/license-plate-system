@@ -162,7 +162,7 @@ Camera không cần cấu hình tài khoản TURN/STUN. Mở app bằng HTTPS, c
   - bảng lịch sử xe ra/vào ở giữa
   - thẻ **Chi tiết sự kiện** bên phải với biển số, thời gian, hướng di chuyển, độ tin cậy OCR và thông tin đăng ký
   - ô xác nhận/sửa biển số trước khi lưu
-- Với **Ảnh/video (thủ công)**, chọn vùng biển số, xác nhận/sửa ký tự, chọn hướng XE VÀO/XE RA và lưu sự kiện; camera trực tiếp tự lọc/lưu theo ngưỡng, không yêu cầu xác nhận.
+- Với **Ảnh/video (thủ công)**, kết quả OCR chỉ là bản xem trước và chưa có trong lịch sử. Chọn hướng XE VÀO/XE RA, xác nhận/sửa biển số, tích **Tôi đã kiểm tra và xác nhận biển số chính xác**, rồi bấm **Ghi nhận vào lịch sử**. Camera trực tiếp tự lọc/lưu theo ngưỡng, không yêu cầu xác nhận từng lượt.
 - Dashboard tính **Tổng xe trong bãi** từ lượt vào/ra đã xác nhận và **Xe vào hôm nay** từ lịch sử trong ngày. Đặt sức chứa tại **Cấu hình > Sức chứa khu vực** để tính **Chỗ trống**; nếu chưa đặt, ứng dụng không tự bịa sức chứa.
 
 ### 7.2. Tải video
@@ -173,7 +173,7 @@ Camera không cần cấu hình tài khoản TURN/STUN. Mở app bằng HTTPS, c
 
 ### 7.3. Lưu lịch sử xe vào/ra
 - Với camera trực tiếp, chọn hướng camera IN/OUT; ứng dụng tự lọc OCR và ghi biển số hợp lệ cùng ảnh bằng chứng.
-- Ảnh/video tải lên vẫn cần kiểm tra và xác nhận thủ công.
+- Ảnh/video tải lên chỉ được ghi vào lịch sử sau khi người vận hành kiểm tra, chọn hướng và xác nhận lưu.
 - Hệ thống lưu vào SQLite và ngăn ghi trùng khung hình liên tiếp.
 - Lịch sử và thẻ chi tiết sự kiện hiển thị ở màn hình giám sát; các sự kiện cần xác minh không được tính vào trạng thái xe trong khu vực.
 

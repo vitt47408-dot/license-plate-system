@@ -1057,8 +1057,8 @@ def record_live_camera_event(
 @st.fragment
 def render_live_camera(direction: str, pair_code: str | None = None) -> None:
     st.caption(
-        "Bật camera trình duyệt bằng nút bên dưới. App nhận khung hình qua HTTPS mỗi khoảng 1 giây, "
-        "tự lưu biển số đúng định dạng khi OCR đạt từ 65% trong ít nhất 2 lần đọc; "
+        "Bật camera trình duyệt bằng nút bên dưới. App nhận khung hình qua HTTPS khoảng 2–3 lần mỗi giây, "
+        "phân tích ngay khung hình chứa biển số và tự lưu kết quả khi OCR đạt độ tin cậy; "
         "các lượt cùng biển số/hướng trong 25 giây được lọc trùng."
     )
     st.caption(
@@ -1089,8 +1089,8 @@ def render_live_camera(direction: str, pair_code: str | None = None) -> None:
     capture = browser_camera(
         key=f"browser_camera_{camera_key}",
         camera_facing_mode="environment",
-        max_width=640,
-        capture_interval_ms=1100,
+        max_width=960,
+        capture_interval_ms=400,
     )
     if capture and capture.get("error"):
         st.error(f"Không mở được camera: {capture['error']}")
@@ -1320,7 +1320,7 @@ def render_overview() -> None:
         unsafe_allow_html=True,
     )
 
-    input_column, history_column, detail_column = st.columns([1.3, 1.0, 0.85], gap="medium")
+    input_column, history_column, detail_column = st.columns([1.65, 1.0, 0.75], gap="medium")
     recent_events = get_recent_events(12)
     vehicles = list_vehicles()
     vehicle_by_plate = {vehicle["plate_number"]: vehicle for vehicle in vehicles}
@@ -1594,17 +1594,25 @@ def render_overview() -> None:
     active_plate = ""
     active_direction = "IN"
     active_time = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-    active_status = "Đã ghi nhận"
+    active_status = "Chưa ghi nhận"
     active_conf = 0.96
 
     if current_plate:
         active_plate = current_plate
         active_conf = current_confidence
-        active_status = "Đã ghi nhận" if current_plate_like else "Chờ xác minh"
+        active_status = "Chưa ghi nhận" if current_plate_like else "Chờ xác minh"
+        saved_scan = st.session_state.get("dashboard_scan_saved_event", {})
+        if saved_scan.get("fingerprint") == current_fingerprint:
+            active_plate = saved_scan["plate_number"]
+            active_status = "Đã ghi nhận"
+            active_time = saved_scan["event_time"]
+            active_direction = saved_scan["direction"]
     elif st.session_state.get("live_current_plate"):
         active_plate = st.session_state.get("live_current_plate")
         active_conf = float(st.session_state.get("live_current_confidence") or 0.95)
         active_direction = st.session_state.get("automatic_camera_direction", "IN")
+        if is_dup_event_recent(active_plate, active_direction, seconds=25):
+            active_status = "Đã ghi nhận"
     elif recent_events:
         selected_event_id = st.session_state.get("dashboard_selected_event_id")
         selected_ev = next((ev for ev in recent_events if ev["id"] == selected_event_id), recent_events[0])
@@ -1673,6 +1681,17 @@ def render_overview() -> None:
         )
         clean_plate = normalize_plate(active_plate) if active_plate else ""
         if clean_plate:
+            is_manual_scan = current_frame is not None and current_analysis is not None
+            if is_manual_scan:
+                saved_scan = st.session_state.get("dashboard_scan_saved_event", {})
+                if saved_scan.get("fingerprint") != current_fingerprint:
+                    active_direction = st.selectbox(
+                        "Hướng di chuyển",
+                        ["IN", "OUT"],
+                        format_func=lambda value: "XE VÀO" if value == "IN" else "XE RA",
+                        key=f"dashboard_scan_direction_{current_fingerprint}",
+                    )
+
             disp_plate = format_plate_display(clean_plate)
             active_veh = vehicle_by_plate.get(clean_plate)
             is_reg = bool(active_veh and active_veh.get("is_registered"))
@@ -1698,9 +1717,9 @@ def render_overview() -> None:
                 )
 
             status_pill = (
-                '<span class="vms-badge vms-badge-green">Đã ghi nhận</span>'
+                f'<span class="vms-badge vms-badge-green">{active_status}</span>'
                 if active_status == "Đã ghi nhận"
-                else '<span class="vms-badge vms-badge-amber">Chờ xác minh</span>'
+                else f'<span class="vms-badge vms-badge-amber">{active_status}</span>'
             )
             if is_vip:
                 reg_pill = '<span class="vms-badge vms-badge-purple">⭐ VIP / Cư dân</span>'
@@ -1747,6 +1766,55 @@ def render_overview() -> None:
                 """,
                 unsafe_allow_html=True,
             )
+
+            if is_manual_scan:
+                saved_scan = st.session_state.get("dashboard_scan_saved_event", {})
+                if saved_scan.get("fingerprint") == current_fingerprint:
+                    st.success(
+                        f"Đã ghi nhận {clean_plate} vào lịch sử lúc "
+                        f"{saved_scan['event_time']}."
+                    )
+                else:
+                    confirmed_plate = st.text_input(
+                        "Xác nhận hoặc sửa biển số cần lưu",
+                        value=current_plate,
+                        key=f"dashboard_scan_plate_{current_fingerprint}",
+                    )
+                    operator_confirmed = st.checkbox(
+                        "Tôi đã kiểm tra và xác nhận biển số chính xác",
+                        key=f"dashboard_scan_confirm_{current_fingerprint}",
+                    )
+                    if st.button(
+                        "Ghi nhận vào lịch sử",
+                        type="primary",
+                        key=f"dashboard_scan_save_{current_fingerprint}",
+                        use_container_width=True,
+                        disabled=not operator_confirmed or not normalize_plate(confirmed_plate),
+                    ):
+                        try:
+                            event = process_confirmed_event(
+                                confirmed_plate,
+                                active_direction,
+                                current_frame,
+                                st.session_state.get("dashboard_capture_source", "uploaded_image"),
+                                current_confidence,
+                            )
+                            log_audit(
+                                "access_event_created",
+                                "access_event",
+                                str(event["id"]),
+                                f"{event['plate_number']} direction={active_direction} "
+                                f"source={event['source_type']} confidence={current_confidence:.3f}",
+                            )
+                            st.session_state["dashboard_scan_saved_event"] = {
+                                "fingerprint": current_fingerprint,
+                                "plate_number": event["plate_number"],
+                                "event_time": event["event_time"],
+                                "direction": active_direction,
+                            }
+                            st.rerun()
+                        except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+                            st.error(f"Không thể ghi nhận biển số vào lịch sử: {exc}")
 
             # Feature: Double-check photos IN vs OUT (Anti-theft)
             entry_ev = fee_info.get("entry_event")

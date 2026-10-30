@@ -216,7 +216,7 @@ class AutomaticPlateProcessorTests(unittest.TestCase):
         self.assertFalse(processor._scan_worker_running)
 
     def test_processes_camera_frames_without_webrtc_dependency(self):
-        self.assertEqual(self.processor.scan_interval, 1.0)
+        self.assertLessEqual(self.processor.scan_interval, 0.5)
         outgoing = self.processor.process(self.frame, now=1.0)
         self.assertEqual(outgoing.shape, self.frame.shape)
 

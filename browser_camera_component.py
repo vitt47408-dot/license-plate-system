@@ -16,8 +16,8 @@ def browser_camera(
     *,
     key: str,
     camera_facing_mode: str = "environment",
-    max_width: int = 640,
-    capture_interval_ms: int = 1100,
+    max_width: int = 960,
+    capture_interval_ms: int = 400,
 ) -> dict[str, Any] | None:
     return _component(
         key=key,

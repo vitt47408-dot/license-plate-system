@@ -22,7 +22,7 @@ class AutomaticPlateProcessor:
         vehicle_detector=None,
         minimum_confidence: float = 0.55,
         required_sightings: int = 1,
-        scan_interval: float = 0.8,
+        scan_interval: float = 0.35,
         consensus_window: float = 6.0,
         model_loader: Callable[[], tuple[object, object, object]] | None = None,
         background_processing: bool = False,
@@ -275,7 +275,7 @@ class AutomaticPlateProcessor:
                 return
             self._last_scan_at = current_time
             self._pending_scan = (frame.copy(), current_time)
-            self._status = "ĐANG PHÂN TÍCH · QUÉT MỖI 1 GIÂY"
+            self._status = "ĐANG PHÂN TÍCH · QUÉT SIÊU NHANH"
             if not self._scan_worker_running:
                 self._scan_worker_running = True
                 start_worker = True
