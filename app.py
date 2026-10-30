@@ -919,9 +919,25 @@ def scan_video_for_plates(
                         ),
                         "rank": rank,
                     }
+                    if progress_callback:
+                        try:
+                            progress_callback(
+                                sample_index + 1,
+                                sample_count,
+                                sorted(found.values(), key=lambda item: item["rank"], reverse=True),
+                            )
+                        except TypeError:
+                            progress_callback(sample_index + 1, sample_count)
 
             if progress_callback and (sample_index % 5 == 0 or sample_index + 1 == sample_count):
-                progress_callback(sample_index + 1, sample_count)
+                try:
+                    progress_callback(
+                        sample_index + 1,
+                        sample_count,
+                        sorted(found.values(), key=lambda item: item["rank"], reverse=True),
+                    )
+                except TypeError:
+                    progress_callback(sample_index + 1, sample_count)
 
             frames_to_skip = min(frame_stride - 1, frame_count - frame_number - 1)
             for _ in range(frames_to_skip):
@@ -936,10 +952,12 @@ def scan_video_for_plates(
 
 
 def start_video_plate_scan(video_path: str, signature: str) -> dict:
-    job = {"signature": signature, "progress": (0, 0)}
+    job = {"signature": signature, "progress": (0, 0), "live_results": []}
 
-    def update_progress(current: int, total: int) -> None:
+    def update_progress(current: int, total: int, live_results=None) -> None:
         job["progress"] = (current, total)
+        if live_results is not None:
+            job["live_results"] = live_results
 
     job["future"] = VIDEO_SCAN_EXECUTOR.submit(
         scan_video_for_plates,
@@ -956,6 +974,19 @@ def render_video_plate_scan_progress(signature: str) -> None:
         return
 
     future: Future = job["future"]
+    live_results = job.get("live_results", [])
+    if live_results:
+        current_live = st.session_state.get("dashboard_video_scan", {})
+        current_plates = [item["plate"] for item in current_live.get("results", [])]
+        new_plates = [item["plate"] for item in live_results]
+        if current_plates != new_plates:
+            st.session_state["dashboard_video_scan"] = {
+                "signature": signature,
+                "results": live_results,
+                "truncated": False,
+                "live": True,
+            }
+            st.rerun()
     if future.done():
         try:
             results, truncated = future.result()
@@ -967,6 +998,7 @@ def render_video_plate_scan_progress(signature: str) -> None:
             "signature": signature,
             "results": results,
             "truncated": truncated,
+            "live": False,
         }
         st.session_state.pop("dashboard_video_scan_job", None)
         st.session_state.pop("dashboard_video_scan_message", None)
@@ -1916,7 +1948,11 @@ def render_overview() -> None:
     ):
         scan_results = video_scan.get("results", [])
         st.divider()
-        st.subheader("Kết quả quét toàn bộ video")
+        st.subheader(
+            "Kết quả phát hiện khi xe đang trong video"
+            if video_scan.get("live")
+            else "Kết quả quét toàn bộ video"
+        )
         st.caption(
             "Ứng dụng lấy mẫu video tối đa 2 khung hình/giây (tối đa 300 khung hình), "
             f"chạy detector ở {VIDEO_SCAN_IMAGE_SIZE} px, gộp kết quả trùng và giữ tối đa "
